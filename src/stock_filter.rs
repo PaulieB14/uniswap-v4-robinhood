@@ -63,10 +63,43 @@ pub fn filter_stock_events(events: pb::Events) -> pb::Events {
         .filter(|m| registry::is_stock_pool(&m.token0, &m.token1))
         .collect();
 
-    // Block-level aggregates are computed over the unfiltered tape upstream, so
-    // carrying them here would attribute whole-chain totals to the equity
-    // subset. Left empty rather than wrong: an absent number invites a lookup,
-    // a wrong one does not.
+    // Per-pool and per-block, with token0/token1 denormalised on, so these
+    // filter exactly like the rows above and stay correct for the equity subset.
+    // PoolStats is built from THIS block's own events (see enrich.rs), so a
+    // filtered set is a true equity-only block aggregate, not a slice of a
+    // whole-chain number.
+    out.pool_stats = events
+        .pool_stats
+        .into_iter()
+        .filter(|p| registry::is_stock_pool(&p.token0, &p.token1))
+        .collect();
+
+    out.donates = events
+        .donates
+        .into_iter()
+        .filter(|d| registry::is_stock_pool(&d.token0, &d.token1))
+        .collect();
+
+    // Everything else is deliberately left empty, for three different reasons.
+    //
+    // `hook_stats` aggregates per HOOK across every pool that hook serves, and
+    // those pools are not all equity. There is no honest way to filter it: the
+    // hook's swap_count is not decomposable from here, so a filtered row would
+    // be a whole-chain number wearing an equity label.
+    //
+    // `pool_totals` / `hook_totals` are LIFETIME totals read back out of the
+    // add-policy stores, which were accumulated over the unfiltered tape. Same
+    // problem, permanently.
+    //
+    // `protocol_fee_events` and `claim_token_events` carry no token pair —
+    // ProtocolFeeEvent has a pool_id but no currencies, and ClaimTokenEvent is
+    // ERC-6909 accounting keyed by currency_id with no pool at all — so equity
+    // membership is not decidable here without a second join this module does
+    // not have. `position_events` and `hook_deployments` are always empty on
+    // this chain (neither contract is deployed).
+    //
+    // Absent rather than wrong: a missing number invites a lookup, a wrong one
+    // does not.
     out
 }
 
@@ -202,6 +235,48 @@ mod tests {
         assert!(s.amount0_ui.starts_with("68.02"), "got {}", s.amount0_ui);
         // Raw amounts survive untouched — UI is additive, not a replacement.
         assert_eq!(s.amount0, "-17006000000000000000");
+    }
+
+    #[test]
+    fn per_block_pool_stats_and_donates_are_filtered_not_dropped() {
+        // Both carry token0/token1 and are computed from this block's own
+        // events, so the equity subset of them is a true number. Dropping them
+        // (as an earlier version did, on the rationale that applies to the
+        // LIFETIME totals) threw away correct data.
+        let out = filter_stock_events(pb::Events {
+            pool_stats: vec![
+                pb::PoolStats { pool_id: "a".into(), token0: NVDA.into(), token1: USDG.into(),
+                                swap_count: 3, ..Default::default() },
+                pb::PoolStats { pool_id: "b".into(), token0: MEME.into(), token1: USDG.into(),
+                                swap_count: 9, ..Default::default() },
+            ],
+            donates: vec![
+                pb::Donate { id: "d1".into(), token0: NVDA.into(), token1: USDG.into(),
+                             ..Default::default() },
+                pb::Donate { id: "d2".into(), token0: MEME.into(), token1: USDG.into(),
+                             ..Default::default() },
+            ],
+            ..Default::default()
+        });
+        assert_eq!(out.pool_stats.len(), 1, "the MEME pool's stats must not survive");
+        assert_eq!(out.pool_stats[0].swap_count, 3);
+        assert_eq!(out.donates.len(), 1);
+        assert_eq!(out.donates[0].id, "d1");
+    }
+
+    #[test]
+    fn whole_chain_aggregates_are_still_dropped() {
+        // hook_stats spans every pool a hook serves, and the *_totals are
+        // lifetime figures accumulated over the unfiltered tape. Neither is
+        // decomposable to the equity subset, so both must stay absent.
+        let out = filter_stock_events(pb::Events {
+            swaps: vec![swap(NVDA, USDG, "1", "-100")],
+            hook_stats: vec![pb::HookStats { hook_address: "0xhook".into(),
+                                             swap_count: 999, ..Default::default() }],
+            ..Default::default()
+        });
+        assert_eq!(out.swaps.len(), 1, "the equity swap still comes through");
+        assert!(out.hook_stats.is_empty(), "a hook's whole-chain count is not an equity count");
     }
 
     #[test]

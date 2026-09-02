@@ -51,6 +51,24 @@ pub fn lookup(addr: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Is this address acceptable as the *other* leg of an equity pool?
+/// Three addresses, chosen because each is independently priceable: native and
+/// WETH are the pricing base by definition, and USDG is the configured
+/// stablecoin, so a stock paired with any of them yields a USD value.
+///
+/// # The known omission
+///
+/// Classifying all 45,827 registry-touching `Initialize` events on this chain
+/// with the rule below keeps 6,785 pools (USDG 4,776 / native 1,396 / WETH 517
+/// / stock-stock 96) and drops 39,042. The largest single dropped counterparty
+/// is `0x0ff7a742…` — `symbol()` "wUSDG", `name()` "Wrapped Global Dollar",
+/// `decimals()` 6, an ERC-1967 proxy — appearing in 574 dropped pools.
+///
+/// It is deliberately NOT admitted here. Adding it would let those 574 pools
+/// through, but a quote leg is only useful if it prices, and wUSDG has not been
+/// shown to hold 1:1 against USDG. Admitting it as a stablecoin without that
+/// proof would mint USD figures from an unverified peg; admitting it as a plain
+/// quote leg would pass pools through that then go unpriced. Verify the wrapper
+/// first, then decide which of the two it is.
 pub fn is_quote_leg(addr: &str) -> bool {
     let a = addr.trim().to_ascii_lowercase();
     a == WETH || a == USDG || a == NATIVE

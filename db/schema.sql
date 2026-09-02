@@ -151,9 +151,12 @@ CREATE TABLE IF NOT EXISTS pool
     decimals_measured       BOOLEAN
 );
 
--- The requested partial index: only pools that actually have a hook. On Base
--- the overwhelming majority of pools are hookless, so this index is a small
--- fraction of the table and answers "everything about hooked pools" directly.
+-- The requested partial index: only pools that actually have a hook. Hookless
+-- pools were the overwhelming majority on Base, and the anchor pool on this
+-- chain is itself hookless (hooks=0x0 in its Initialize log), so the index is
+-- expected to stay a small fraction of the table and answers "everything about
+-- hooked pools" directly. The ratio has not been measured on chain 4663; the
+-- index is correct either way, it is only its size that is assumed.
 CREATE INDEX IF NOT EXISTS pool_hook_address_idx ON pool (hook_address) WHERE has_hook;
 CREATE INDEX IF NOT EXISTS pool_hook_flags_idx   ON pool (hook_flags)   WHERE has_hook;
 -- Dynamic-fee pools are the other rare-and-interesting subset.
@@ -246,8 +249,8 @@ CREATE TABLE IF NOT EXISTS swap
     amount_usd              NUMERIC,
     native_price_usd        NUMERIC,
     priced                  BOOLEAN,
-    -- Denormalised token metadata. Without these a consumer sees 0x833589fc…
-    -- instead of USDC on every row, and joining is not possible because there
+    -- Denormalised token metadata. Without these a consumer sees 0x5fc5360d…
+    -- instead of USDG on every row, and joining is not possible because there
     -- was no token table to join to.
     token0_symbol           TEXT,
     token1_symbol           TEXT,

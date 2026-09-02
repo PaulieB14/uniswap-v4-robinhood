@@ -190,6 +190,23 @@ pub const WHITELIST_TOKENS: [&str; 3] = [WRAPPED_NATIVE, USDC, NATIVE_ADDRESS];
 ///
 /// Chosen by configuration and pinned, per the Base rationale above — the point
 /// is that it cannot move underneath us, not that it was picked blindly.
+/// A DEEPER ALTERNATIVE EXISTS AND WAS NOT TAKEN.
+///
+/// This anchor was chosen among WETH/USDG pools. Measured over blocks
+/// 52,374,713–52,671,800, the native/USDG 500/10 pool
+/// 0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982 is the
+/// better one on every axis: virtual reserves 229.45 native / 547,620 USDG
+/// (~$1.10M) against this pool's 107.49 / 256,123 (~$512k), 1,994 swap-blocks
+/// against 1,616, and it is ~8.6M blocks older. The two quote 2,386.65 and
+/// 2,382.70 USDG per native at block 52,681,276 — 0.17% apart, so they agree
+/// and this is a depth choice, not a correctness one.
+///
+/// Switching would also raise how often derived prices refresh, which is the
+/// staleness discussed on `price_writes`. It is left for a deliberate,
+/// stream-tested change rather than done here: the anchor sets the USD basis
+/// for every figure the package emits, `STABLECOIN_IS_TOKEN0` must be
+/// re-derived for the new pool's currency order, and none of that has been
+/// exercised against live data.
 pub const STABLECOIN_NATIVE_POOL_ID: &str =
     "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593";
 
@@ -801,9 +818,30 @@ fn observations(events: &pb::Events) -> BTreeMap<String, Observation> {
 /// write, and stablecoin-anchored candidates fall back to `None`. That is
 /// correct rather than lossy: a `set` store keeps the previous value, so a
 /// reader still sees the last known price (with its `block` field to judge how
-/// stale it is). What is genuinely lost is a token whose *only* whitelist pool
-/// is against a stablecoin, in a block where the anchor pool was quiet — it goes
-/// unpriced for that block. No such token exists on the Base whitelist.
+/// stale it is).
+///
+/// # This bites much harder on Robinhood than it did on Base
+///
+/// The ported comment here used to end "No such token exists on the Base
+/// whitelist." On this chain nearly every token is such a token: a registry
+/// stock whose only pool is against USDG. Writing `derived_native(STOCK)`
+/// requires the stock's pool AND the anchor to trade in the SAME block, and
+/// they rarely do — measured over blocks 52,374,713–52,671,800, NVDA/USDG
+/// traded in 648 blocks, the anchor in 1,616, and both in 4 (0.62%).
+///
+/// The consequence is NOT that equity swaps go unpriced, and the difference
+/// matters. [`usd_for_leg`] returns the human amount directly for a stablecoin
+/// leg — no store read, no anchor — so a STOCK/USDG swap always has an exact
+/// USD value from its USDG side. What the stale write actually costs is
+/// precision: [`tracked_amount_usd`] AVERAGES the two legs when both are
+/// priced, so a stock leg carrying a derived ratio from thousands of blocks ago
+/// drags an otherwise-exact number off. A stock leg that is absent entirely
+/// yields a BETTER `amount_usd` than one that is stale.
+///
+/// Left as-is because averaging both anchored legs is the subgraph's
+/// `getTrackedAmountUSD` shape and this package deliberately mirrors it.
+/// Consumers wanting the exact figure for a stock/stablecoin swap should read
+/// the stablecoin leg's `amountN_usd` rather than `amount_usd`.
 fn price_writes(events: &pb::Events) -> Vec<(u64, String, String)> {
     let obs = observations(events);
     let mut writes: Vec<(u64, String, String)> = Vec::new();
@@ -1726,6 +1764,39 @@ mod tests {
         };
         let w = writes_map(&events);
         assert!(w.is_empty(), "expected no writes, got {:?}", w.keys());
+    }
+
+    #[test]
+    fn the_anchor_is_pinned_to_literals_verified_on_chain() {
+        // Every other test that touches the anchor reads STABLECOIN_NATIVE_POOL_ID
+        // itself, so editing the constant leaves them all green while silently
+        // repricing the entire package. This test is the one place the anchor's
+        // identity is written down independently.
+        //
+        // Verified by RPC on chain 4663 (eth_chainId 0x1237). The pool's
+        // Initialize log, at block 8,793,983:
+        //   topic1 (id)      0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593
+        //   topic2 (curr0)   0x…0bd7d308f8e1639fab988df18a8011f41eacad73   WETH, decimals()=18
+        //   topic3 (curr1)   0x…5fc5360d0400a0fd4f2af552add042d716f1d168   USDG, decimals()=6
+        //   data             fee=500, tickSpacing=10, hooks=0x0
+        // Of the 134 WETH/USDG Initialize logs on this chain, exactly one has
+        // (fee 500, tickSpacing 10, no hook).
+        assert_eq!(
+            STABLECOIN_NATIVE_POOL_ID,
+            "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593",
+        );
+        assert_eq!(WRAPPED_NATIVE, "0x0bd7d308f8e1639fab988df18a8011f41eacad73");
+        assert_eq!(USDC, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+
+        // USDG is currency1 in that log, so the native price is token1Price.
+        // Flipping this reads 0.00041 instead of ~2400 — six orders of
+        // magnitude, applied to every USD figure the package emits.
+        assert!(!STABLECOIN_IS_TOKEN0);
+
+        // And the stablecoin really is the 6-decimal leg, not the 18-decimal
+        // one: sqrt_price_x96_to_token_prices is passed (18, 6) in that order.
+        assert!(is_stablecoin(USDC));
+        assert!(!is_stablecoin(WRAPPED_NATIVE));
     }
 
     #[test]

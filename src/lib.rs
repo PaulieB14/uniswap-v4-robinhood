@@ -1,19 +1,36 @@
-//! Uniswap V4 on Base — Substreams port of the `uniswap-v4-base-3` subgraph
-//! (Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB).
+//! Uniswap V4 on **Robinhood Chain** (Arbitrum Orbit L2, eip155:4663), filtered
+//! to the official Robinhood Stock Token registry.
+//!
+//! Ported from `uniswap-v4-base`, which was itself a port of the
+//! `uniswap-v4-base-3` subgraph (Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB).
+//! The v4-core ABI is identical, so every decoder below is unchanged; what
+//! differs is the addresses, the USD anchor, and the equity layer on top.
 //!
 //! # Module graph
 //!
 //! ```text
 //!   sf.ethereum.type.v2.Block
 //!            |
-//!        map_events        decode PoolManager / PositionManager / Arrakis logs
+//!        map_events        decode PoolManager logs
 //!         |      \
 //!         |    store_pools      remember every Initialize, keyed pool:<poolId>
 //!         |      /
 //!       map_enriched       join the two: denormalise the PoolKey onto every
 //!            |             swap / modify_liquidity row, emit PoolStats+HookStats
-//!         db_out           render as Postgres DatabaseChanges
+//!            |
+//!       store_prices       native USD off the anchor pool, derived native per token
+//!            |
+//!        map_totals        + decimal-adjusted amounts, per-leg and tracked USD,
+//!         |      \         and running PoolTotals / HookTotals
+//!         |       \
+//!     db_out    map_stock_events    the equity subset, with registry identity
+//!                                   and ERC-8056 UI share counts
 //! ```
+//!
+//! `PositionManager` and the Arrakis hook factory are decoded by `map_events` on
+//! Base but are NOT wired here — neither is deployed on chain 4663 (`eth_getCode`
+//! returns zero bytes at both Base addresses). The modules are kept in the tree
+//! so the diff against upstream stays readable; see the bottom of `map_events`.
 //!
 //! ## Why the store exists at all
 //!
@@ -24,16 +41,23 @@
 //! what a swap traded. The subgraph papers over this with `Pool.load(poolId)`
 //! against graph-node's implicit entity store; Substreams has no implicit
 //! state, so the join has to be an explicit store module. That is the
-//! correctness fix this package now carries, and it is why `db_out` consumes
-//! `map_enriched` rather than `map_events`.
+//! correctness fix this package carries, and it is why nothing downstream
+//! consumes `map_events` directly.
 //!
 //! ## What is exposed to the engine
 //!
-//! `map_events`, `store_pools`, `map_enriched`, `store_tokens` and `db_out` are
-//! declared in `substreams.yaml`. `map_events` is kept as a public module and
-//! NOT folded into `map_enriched`: it is the cacheable, store-free stage, so a
-//! consumer that only wants raw decoded logs pays nothing for the join, and
-//! re-running the enrichment does not re-decode the chain.
+//! `map_events`, `store_pools`, `map_enriched`, `store_tokens`, `store_prices`,
+//! `store_pool_totals`, `store_hook_totals`, `map_totals`, `map_stock_events`
+//! and `db_out` are declared in `substreams.yaml`. `map_events` is kept as a
+//! public module and NOT folded into `map_enriched`: it is the cacheable,
+//! store-free stage, so a consumer that only wants raw decoded logs pays
+//! nothing for the join, and re-running the enrichment does not re-decode the
+//! chain.
+//!
+//! Both `db_out` and `map_stock_events` read `map_totals`, not `map_enriched`.
+//! `attach_usd()` runs inside `map_totals` and nowhere else, and it writes the
+//! adjusted amounts and every USD field; reading `map_enriched` instead yields
+//! rows with all of them silently empty.
 
 pub mod registry;
 pub mod stock_filter;

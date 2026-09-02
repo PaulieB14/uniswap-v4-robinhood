@@ -28,12 +28,12 @@ use crate::abi::pool_manager::events;
 use crate::hooks;
 use crate::pb::uniswap::v4::v1 as pb;
 
-/// Base mainnet PoolManager. Kept as a byte array so the hot-loop filter is a
-/// 20-byte memcmp rather than a hex-string comparison — this loop sees every
-/// log on Base.
 /// Uniswap V4 PoolManager on Robinhood Chain (eip155:4663), deployed at block
 /// 9070. Base's was 0x4985…2b2b; only the address filter changes here, the
 /// v4-core ABI and every decode arm below are identical.
+///
+/// Kept as a byte array so the hot-loop filter is a 20-byte memcmp rather than a
+/// hex-string comparison — this loop sees every log on the chain.
 const POOL_MANAGER: [u8; 20] = hex!("8366a39cc670b4001a1121b8f6a443a643e40951");
 
 /// Decode every PoolManager log in the block into `events`.

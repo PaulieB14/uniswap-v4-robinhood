@@ -195,6 +195,23 @@ level, not Base specific.
   enough to be representative.)
 - Historical multipliers, and snapshot drift on accruing names (both above).
 - No PositionManager or Arrakis (above).
+- **`amount_usd` on a stock/USDG swap is degraded by a stale leg, not absent.**
+  Writing `derived_native(STOCK)` needs the stock's pool and the WETH/USDG
+  anchor to trade in the *same* block, and they seldom do — over blocks
+  52,374,713–52,671,800, NVDA/USDG traded in 648 blocks, the anchor in 1,616,
+  and both in 4 (0.62%). The swaps are still priced: the USDG leg is a
+  configured stablecoin, so its `amount1_usd` is the human amount directly, with
+  no store read and no anchor needed. But `amount_usd` *averages* the two
+  anchored legs (the subgraph's `getTrackedAmountUSD` shape, deliberately
+  mirrored), so a stock leg carrying a ratio from thousands of blocks ago drags
+  an otherwise-exact figure off. **For an exact number on a stock/stablecoin
+  swap, read the stablecoin leg's `amountN_usd`, not `amount_usd`.** A deeper,
+  more active native/USDG pool exists and would reduce this; switching the
+  anchor is recorded in `pricing.rs` and left for a stream-tested change.
+- **The quote-leg set omits wUSDG.** Classifying all 45,827 registry-touching
+  `Initialize` events keeps 6,785 pools and drops 39,042; the largest dropped
+  counterparty is `0x0ff7a742…` ("Wrapped Global Dollar", 6 decimals) in 574
+  pools. It is held out until its peg to USDG is verified — see `is_quote_leg`.
 - **The SQL sink carries no equity columns.** `db_out` consumes `map_totals`,
   which sits *upstream* of `map_stock_events`, so `token0_is_stock`,
   `registry_symbol`, `amount0_ui`/`amount1_ui` and `ui_multiplier` never reach
