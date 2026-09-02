@@ -4,10 +4,23 @@
 //! key, not a bare array). Regenerate with scripts/gen-registry.sh then
 //! scripts/gen-registry-rs.py. Do not hand-edit.
 //!
-//! Snapshot: 194 tokens, all chainId 4663, all 18 decimals.
+//! Snapshot: 194 tokens, all chainId 4663, all 18 decimals, taken 2026-09-02.
+//!
+//! MULTIPLIERS GO STALE INTRADAY. `currentMultiplier` is not only a
+//! corporate-action figure: for dividend-accruing names it moves continuously.
+//! F drifted from 1.000000000000000000 to 1.000145502866134027 (+0.0146%) in
+//! under two hours on the day this snapshot was taken. A substreams module is
+//! deterministic and cannot fetch at runtime, so a compile-time snapshot is the
+//! only option — but that makes `amount*_ui` exact for splits (CRWD's 4.0,
+//! where the raw amount is wrong by 300%) and approximate for accruals, drifting
+//! with the age of this file. Regenerate and re-publish to reset the error;
+//! consumers needing exactness must read the multiplier on chain themselves.
 //!
 //! Identity is the CONTRACT ADDRESS. Ticker search on the explorer returns
 //! impersonators — some flagged verified — so a symbol match is never used.
+
+/// The date this snapshot was taken, so a consumer can bound the drift above.
+pub const SNAPSHOT_DATE: &str = "2026-09-02";
 
 /// (address, ticker, currentMultiplier as a plain decimal string)
 pub const STOCK_TOKENS: &[(&str, &str, &str)] = &[

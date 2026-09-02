@@ -26,7 +26,9 @@ because the tokens, fee, tickSpacing and hook live in the `PoolKey` that was
 hashed away at `Initialize`. `store_pools` remembers every `Initialize` and
 `map_enriched` joins it back onto every swap and liquidity row.
 
-Then `map_stock_events` keeps only the pools that are actually equity markets.
+`map_totals` then adds decimal-adjusted amounts and USD values, and
+`map_stock_events` keeps only the pools that are actually equity markets —
+carrying that pricing through and attaching UI share counts.
 
 ## Modules
 
@@ -34,7 +36,8 @@ Then `map_stock_events` keeps only the pools that are actually equity markets.
 |---|---|
 | `map_events` | The complete, unfiltered V4 tape. Debug against this. |
 | `map_enriched` | Same rows with tokens, symbols, fee tier, hook permissions joined on. |
-| **`map_stock_events`** | **The equity subset, with ERC-8056 UI amounts. This is the point.** |
+| `map_totals` | `map_enriched` plus decimal-adjusted amounts, USD values and running totals. |
+| **`map_stock_events`** | **The equity subset of `map_totals`, with ERC-8056 UI amounts. This is the point.** |
 | `db_out` | Postgres sink over the enriched stream. |
 
 ## Running it
@@ -116,11 +119,21 @@ A raw ERC-20 balance is not the share count after a corporate action. Each
 asset carries a `currentMultiplier`, and:
 
 ```
-ui_amount = raw * multiplier
+ui_amount = amount_adjusted * multiplier          # amount_adjusted = -raw / 10^decimals
 ```
 
-**Not `raw * multiplier / 1e18`.** The registry publishes the multiplier as a
-plain decimal written to 18 places — CRWD is `"4.000000000000000000"`, meaning
+Two traps here, and each produces a plausible-looking wrong number.
+
+**It is not `raw * multiplier`.** `amount0`/`amount1` are the raw int128s the
+PoolManager emits; the decimals have not been divided out. Multiplying those
+gives a raw-scaled integer, not a share count — a real 0.3185 CRWD swap comes
+out as `1274147532818248372`. The input must be `amount0_adjusted`, which is
+written by `attach_usd()` inside `map_totals`. That is why `map_stock_events`
+reads `map_totals` and not `map_enriched`: on `map_enriched` the adjusted fields
+are still empty, and the module would silently emit no UI amounts at all.
+
+**It is not `… / 1e18`.** The registry publishes the multiplier as a plain
+decimal written to 18 places — CRWD is `"4.000000000000000000"`, meaning
 **4.0**, not 4e18. Reading those eighteen zeros as a fixed-point scale turns
 17.006 CRWD into 6.8e-17 instead of 68.024 — wrong by exactly the factor you
 were correcting for. AAPL's `"1.000566080061092436"` settles it: a small split
@@ -134,6 +147,19 @@ amounts are additive fields, and empty means *not a registry token*, never 1.0.
 multiplier change is scaled by today's multiplier, so this is **not
 corporate-action-correct for historical dates**. The token contracts emit
 `UIMultiplierUpdated`; decoding that per-token is the fix and is not done here.
+
+**And "current" means as of the snapshot, which ages fast.** The multipliers are
+compiled in from `registry/registry.json` (`SNAPSHOT_DATE`, currently
+2026-09-02) because a substreams module is deterministic and cannot fetch at
+runtime. They are not only corporate-action figures: dividend-accruing names
+move continuously. `F` drifted from `1.000000000000000000` to
+`1.000145502866134027` (+0.0146%) within two hours of this snapshot being taken.
+
+So the UI amount is **exact for splits** — the failure that actually matters,
+where a raw amount is wrong by hundreds of percent — and **approximate for
+accruals**, with an error that grows with the age of the snapshot. Regenerate
+via `scripts/gen-registry.sh` and re-publish to reset it; read `ui_multiplier`
+on each row to see exactly what was applied.
 
 ## Tests
 
@@ -153,10 +179,21 @@ level, not Base specific.
 
 ## Known gaps
 
-- No live stream verification in this repo's history: the ABI was proven correct
-  by matching every on-chain PoolManager topic0 against the module's decoders,
-  but an end-to-end `substreams run` needs a Graph Market JWT.
-- Historical multipliers (above).
+- **No module in this package has ever been executed against live Robinhood
+  blocks.** Everything below the wasm boundary is verified — 111 unit tests, and
+  every on-chain PoolManager `topic0` matched against the module's decoders to
+  prove the v4-core ABI is unchanged from Base — but an end-to-end
+  `substreams run` needs a streaming JWT that was not available while this was
+  built. `map_stock_events` in particular has never seen a real block. Treat
+  v0.1.0 as compile- and logic-verified, not runtime-verified.
+- V4 event density here is **comparable to Base, not sparser**: 14 of 15 blocks
+  sampled across ~1,450 recent blocks carried PoolManager logs (93%), averaging
+  9.67 logs per block, against Base's 148/148. That is why this port keeps Base's
+  decision not to ship a filtered-events index — at this density it would skip
+  almost nothing. (Small sample: single-block `eth_getLogs` calls, because the
+  public RPC caps range queries at 10,000 matches and rejects any window wide
+  enough to be representative.)
+- Historical multipliers, and snapshot drift on accruing names (both above).
 - No PositionManager or Arrakis (above).
 - `map_stock_events` emits no block-level aggregates. `pool_stats` / `hook_stats`
   are computed across the whole chain upstream, and carrying them into the

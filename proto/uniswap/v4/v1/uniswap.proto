@@ -190,7 +190,8 @@ message Swap {
   // address, not the other way round.
   string registry_symbol = 33;
 
-  // ERC-8056 UI amounts: raw * currentMultiplier / 1e18, as decimal strings.
+  // ERC-8056 UI amounts: amountN_adjusted * currentMultiplier, as decimal
+  // strings. NOT `raw * multiplier`, and NOT divided by 1e18 — see below.
   //
   // These are the share counts a human recognises. A raw amount is wrong after
   // a corporate action — CRWD's multiplier is 4.0, so raw units understate the
@@ -198,13 +199,31 @@ message Swap {
   // ~68 shares. Raw amounts are kept unchanged in amount0/amount1; these are
   // strictly additive.
   //
-  // Empty when the leg is not a registry token, or when no multiplier is
-  // known. Empty is not 1.0 — do not substitute.
+  // Derived from `amountN_adjusted`, so they carry that field's POOL-CENTRIC
+  // sign (opposite the raw swapper-centric one) and, like it, are written only
+  // when `amounts_adjusted` is true. Deriving them from the raw int128 instead
+  // overstates every value by 10^decimals.
+  //
+  // ACCURACY IS BOUNDED BY THE SNAPSHOT'S AGE. The multiplier is compiled in,
+  // and for dividend-accruing names it drifts continuously — one ticker moved
+  // +0.0146% within two hours of the snapshot being taken. So this field is
+  // exact for corporate actions, which is the failure that matters (a split
+  // makes the raw amount wrong by hundreds of percent), and approximate for
+  // accruals. Read `ui_multiplier` to see exactly what was applied, and the
+  // module's SNAPSHOT_DATE to bound the error.
+  //
+  // Empty when the leg is not a registry token, when no multiplier is known, or
+  // when decimals were unavailable. Empty is not 1.0 — do not substitute.
   string amount0_ui = 34;
   string amount1_ui = 35;
 
   // The multiplier applied, so a consumer can audit the arithmetic rather than
-  // trust it. Decimal string, 1e18-scaled as the registry publishes it.
+  // trust it.
+  //
+  // A PLAIN DECIMAL, written to 18 places — CRWD is "4.000000000000000000",
+  // meaning 4.0, not 4e18. It is NOT 1e18-scaled despite the fixed width, and
+  // dividing by 1e18 to "unscale" it produces ~4e-18 and silently zeroes every
+  // UI amount. Verified against all 194 chain-4663 assets in the live registry.
   string ui_multiplier = 36;
 }
 

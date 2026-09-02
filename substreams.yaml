@@ -32,10 +32,12 @@ imports:
   database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
   sql: https://github.com/streamingfast/substreams-sink-sql/releases/download/protodefs-v1.0.7/substreams-sink-sql-protodefs-v1.0.7.spkg
   # Block-level skip (eth_common:filtered_events) deliberately NOT used.
-  # Measured, not assumed: 148 of 148 sampled Base blocks contain V4 activity —
-  # 100%. A block-index filter is a cost win only for SPARSE targets; here it
-  # would skip nothing and buy a dependency plus a footgun (it takes one
-  # evt_addr and this package watches three contracts).
+  # Base shipped no eth_common:filtered_events index here because 148 of 148
+  # sampled Base blocks contained V4 activity, so filtering bought nothing.
+  # Measured independently on Robinhood Chain: 14 of 15 blocks sampled across
+  # ~1,450 recent blocks carried PoolManager logs (93%), mean 9.67 logs/block.
+  # Same conclusion, so the same decision holds — an index would skip almost
+  # nothing. Re-measure before adding one; do not assume this chain is sparse.
 
 protobuf:
   files:
@@ -61,7 +63,7 @@ modules:
   # The live subgraph GRAFTS at 26990278, meaning it never indexed its own early
   # history. This backfills the real range in parallel instead. That is also
   # what makes enrichment COMPLETE rather than best-effort here: no V4 pool on
-  # Base predates 25350988, so an empty token0 on a swap row means a genuine
+  # No pool on this chain predates 9070, so an empty token0 on a swap row means a genuine
   # bug or a partial-range run, never "the pool is too old".
   # ---------------------------------------------------------------------------
 
@@ -118,11 +120,19 @@ modules:
   # raw tape. map_events above stays complete and unfiltered so it remains
   # debuggable; the filtering happens here, after store_pools has joined
   # token0/token1 on — a V4 Swap log carries only the poolId.
+  # Reads map_totals, NOT map_enriched. attach_usd() — which runs inside
+  # map_totals and nowhere else — is what writes `amountN_adjusted`,
+  # `amountN_usd`, `amount_usd` and `priced`. On map_enriched all of those are
+  # still empty, so wiring this module there type-checks, runs, and silently
+  # emits an equity tape with no UI amounts and no USD on any row: both of the
+  # things this module exists to add. map_totals is a documented superset of
+  # map_enriched and the block-level totals it carries are dropped by the
+  # filter, so nothing else changes.
   - name: map_stock_events
     kind: map
     initialBlock: 9070
     inputs:
-      - map: map_enriched
+      - map: map_totals
     output:
       type: proto:uniswap.v4.v1.Events
 

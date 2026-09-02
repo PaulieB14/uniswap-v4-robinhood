@@ -38,15 +38,22 @@
 //! has no read access to what it has written, so that recursion is not available
 //! here.
 //!
-//! It turns out not to matter **on Base**, because every token on the whitelist
-//! is reachable in one hop:
+//! It turns out not to matter **on Robinhood Chain either**, because every
+//! priceable token is still reachable in one hop:
 //!
 //! | token | how it is priced | needs a previous value? |
 //! |---|---|---|
-//! | native ETH (`address(0)`) | 1 by definition | no |
-//! | WETH | 1 by definition | no |
-//! | USDC | `1 / ethPriceUSD`, the subgraph's own stablecoin shortcut | no — same pool, same block |
-//! | ZORA | the ZORA/native pool's `token0Price` | no — the other side is native, `derivedETH = 1` |
+//! | native (`address(0)`) | 1 by definition | no |
+//! | WETH `0x0bd7…d73` | 1 by definition | no |
+//! | USDG `0x5fc5…168` | `1 / ethPriceUSD` off the anchor pool | no — same pool, same block |
+//! | a registry stock token | its USDG or WETH pool's `token0Price`/`token1Price` | no — the other leg is already an anchor |
+//!
+//! The last row is where this chain differs from Base. Base's odd one out was
+//! ZORA, a single whitelist token priced through a native pool; here the same
+//! slot is filled by ~194 equity tokens admitted via [`crate::registry`]. The
+//! shape is identical — one hop to an anchor leg — so the one-hop argument
+//! carries over unchanged, but the *count* does not, and a stock token whose
+//! only pool is against another stock token is unpriceable by construction.
 //!
 //! USDC is the interesting case: its price and the native price come off the
 //! *same* `sqrtPriceX96` of the *same* anchor pool. `price0` of WETH/USDC is
@@ -478,7 +485,7 @@ pub fn effective_decimals(token: &str, decimals: u32, measured: bool) -> Option<
 /// The field set is deliberately a 1:1 map onto the entity fields the subgraph's
 /// loop reads (`pool.token0Price`, `pool.totalValueLockedToken1`,
 /// `token1.derivedETH`, ...) so a test can be built literally out of a subgraph
-/// query response and compared — which is what `zora_matches_deployed_subgraph`
+/// query response and compared — which is what `pool_search_reads_the_correct_side_of_the_pair`
 /// does.
 ///
 /// Both sides carry their own depth and their own `derived_native`, rather than
@@ -986,7 +993,7 @@ fn native_side_depth(o: &Observation) -> BigDecimal {
 /// Re-derives the winning candidate the same way [`find_native_per_token`] picks
 /// it. Duplicated selection logic is a real smell, but the alternative is
 /// changing the ported function's return type away from the subgraph's shape;
-/// the two are kept honest by `zora_attribution_names_the_winning_pool`.
+/// the two are kept honest by `attribution_names_the_winning_pool`.
 fn attribution(
     token: &str,
     candidates: &[PoolPriceCandidate],
@@ -1152,7 +1159,8 @@ mod tests {
     #[test]
     fn native_price_reads_the_configured_side_of_the_anchor() {
         let (price0, price1) = sqrt_price_x96_to_token_prices(&bi(ANCHOR_SQRT), 18, 6);
-        // stablecoinIsToken0 == false on Base, so the native price is token1Price.
+        // STABLECOIN_IS_TOKEN0 == false on Robinhood (USDG is token1 in the
+        // anchor pool, verified on-chain), so the native price is token1Price.
         // Getting this backwards inverts every USD figure in the package, so it
         // is asserted rather than assumed — the wrong side is 0.00040851…,
         // which is a plausible-looking number.
@@ -1320,12 +1328,16 @@ mod tests {
         );
     }
 
-    /// The native/ZORA pool as the subgraph reports it. Built from entity fields
-    /// so `find_native_per_token` is driven with the subgraph's own TVL numbers
-    /// and the ported `minimumNativeLocked` of 1.
+    /// A whitelist-token/native pool, built from real entity fields so
+    /// `find_native_per_token` is driven with a subgraph's own TVL numbers and
+    /// the ported `minimumNativeLocked` of 1.
     ///
-    /// pool 0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a
-    fn zora_candidate_from_subgraph() -> PoolPriceCandidate {
+    /// The numbers are Base's (pool
+    /// 0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a,
+    /// token ZORA) and are NOT Robinhood ground truth — see
+    /// `pool_search_reads_the_correct_side_of_the_pair` for why they are still
+    /// the right fixture for the property under test.
+    fn whitelist_candidate_fixture() -> PoolPriceCandidate {
         PoolPriceCandidate {
             pool_id: "0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a"
                 .to_string(),
@@ -1341,20 +1353,20 @@ mod tests {
     }
 
     #[test]
-    fn zora_matches_deployed_subgraph() {
-        // ZORA is the only Base whitelist token that actually goes through the
-        // pool search. The deployed subgraph reports
-        //   ALT_TOKEN.derivedETH = 0.000002760022414164888548236587471837841
-        // and this pool's token0Price is that number, which confirms the
-        // subgraph selected this pool and that "token0 per token1" is the right
-        // side of the pair to read.
+    fn pool_search_reads_the_correct_side_of_the_pair() {
+        // A NUMERIC FIXTURE CARRIED OVER FROM BASE, not Robinhood ground truth.
+        // The value below came from Base's deployed subgraph (where the token
+        // was ZORA); it is retained because the property under test — that the
+        // pool search reads "token0 per token1" and not its inverse — is pure
+        // arithmetic and identical on every chain. There is no deployed
+        // Robinhood subgraph to check against, so nothing here claims one.
         let got = find_native_per_token(
             ALT_TOKEN,
             None,
-            &[zora_candidate_from_subgraph()],
+            &[whitelist_candidate_fixture()],
             &minimum_native_locked(),
         )
-        .expect("ZORA priced from the native pool");
+        .expect("token priced from the native pool");
         assert_price_eq(
             &got,
             &bd("0.000002760022414164888548236587471837841"),
@@ -1364,7 +1376,7 @@ mod tests {
 
     #[test]
     fn deepest_pool_wins_and_shallow_pools_are_rejected() {
-        let deep = zora_candidate_from_subgraph();
+        let deep = whitelist_candidate_fixture();
 
         // Same token, a wrong price, and more depth — it must win.
         let mut deeper = deep.clone();
@@ -1597,17 +1609,17 @@ mod tests {
     }
 
     #[test]
-    fn zora_attribution_names_the_winning_pool() {
+    fn attribution_names_the_winning_pool() {
         let w = writes_map(&realistic_block());
-        let zora = &w[&derived_native_key(ALT_TOKEN)];
+        let alt = &w[&derived_native_key(ALT_TOKEN)];
         assert_eq!(
-            zora.source_pool,
+            alt.source_pool,
             "0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a"
         );
         // Virtual depth on the native leg: ~0.0816 ETH, over the dust floor and
         // 163x under the subgraph's 13.3 ETH TVL for the same pool.
-        assert!(zora.native_locked.gt(&minimum_active_native()));
-        assert!(zora.native_locked.lt(&bd("0.1")));
+        assert!(alt.native_locked.gt(&minimum_active_native()));
+        assert!(alt.native_locked.lt(&bd("0.1")));
     }
 
     #[test]

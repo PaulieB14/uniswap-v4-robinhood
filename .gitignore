@@ -2,3 +2,4 @@
 *.spkg
 target/
 *.spkg
+test-manifest.local.yaml

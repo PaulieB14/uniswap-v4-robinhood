@@ -1,6 +1,8 @@
 -- ============================================================================
--- Uniswap V4 on Base — PostgreSQL sink schema for substreams-sink-sql
--- Source of truth: subgraph Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB
+-- Uniswap V4 on Robinhood Chain — PostgreSQL sink schema for substreams-sink-sql
+-- Ancestry: ported from uniswap-v4-base@v0.1.4, which was itself converted from
+-- the Base subgraph Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB. Neither is
+-- this chain — the shape is inherited, the data is not.
 -- ============================================================================
 --
 -- WHY POSTGRESQL AND NOT CLICKHOUSE

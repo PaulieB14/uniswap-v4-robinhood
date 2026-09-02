@@ -5,7 +5,7 @@
 //! `map_events` stays a complete, unfiltered V4 tape. That is deliberate: it is
 //! what you debug against, and silently dropping rows upstream would make every
 //! "why is this pool missing" question unanswerable. The filtering happens here,
-//! downstream of `map_enriched`, so the two views coexist.
+//! downstream of `map_totals`, so the two views coexist.
 //!
 //! # What survives the filter
 //!
@@ -13,12 +13,19 @@
 //! least one being a registry stock token. See [`crate::registry::is_stock_pool`]
 //! for why both legs are checked rather than either.
 //!
-//! # Ordering dependency
+//! # Ordering dependencies
 //!
-//! This runs after `store_pools` has joined `token0` / `token1` onto each row.
-//! A V4 `Swap` log carries only the poolId — the currencies live in the PoolKey
-//! that was hashed away at `Initialize` — so filtering before that join would
-//! see empty token fields and drop everything.
+//! Two, and both are silent when violated:
+//!
+//! 1. This runs after `store_pools` has joined `token0` / `token1` onto each
+//!    row. A V4 `Swap` log carries only the poolId — the currencies live in the
+//!    PoolKey that was hashed away at `Initialize` — so filtering before that
+//!    join would see empty token fields and drop *everything*.
+//! 2. The input must be `map_totals`, not `map_enriched`. `attach_usd()` runs
+//!    inside `map_totals` and nowhere else, and it is what writes both
+//!    `amountN_adjusted` (which the UI amounts are derived from) and the USD
+//!    fields `amountN_usd` / `amount_usd` / `priced`. Reading `map_enriched`
+//!    instead yields an equity tape with neither — silently, and with no error.
 
 use crate::pb::uniswap::v4::v1 as pb;
 use crate::registry;
@@ -64,13 +71,28 @@ pub fn filter_stock_events(events: pb::Events) -> pb::Events {
 }
 
 /// Attach registry identity and UI amounts to one swap.
+///
+/// The UI amount is built from `amountN_adjusted`, NOT from `amountN`.
+/// `amountN` is the raw int128 the PoolManager emitted; multiplying that by the
+/// multiplier yields a raw-scaled integer, not a share count — for CRWD at 18
+/// decimals it overstates the answer by 1e18 (0.3185 CRWD came out as
+/// 1274147532818248372). `amountN_adjusted` has already had `10^decimals`
+/// divided out, so it is the only correct input here.
+///
+/// That also means the UI amount inherits `amounts_adjusted`: when decimals are
+/// unknown the adjusted value is absent, and an absent UI amount is correct.
+/// It likewise inherits the POOL-CENTRIC sign of the adjusted fields, which is
+/// the opposite of the raw swapper-centric one.
 fn annotate_swap(mut s: pb::Swap) -> pb::Swap {
+    let adjusted = s.amounts_adjusted;
     if let Some((sym, mult)) = registry::lookup(&s.token0) {
         s.token0_is_stock = true;
         s.registry_symbol = sym.to_string();
         s.ui_multiplier = mult.to_string();
-        if let Some(ui) = registry::ui_amount(&s.amount0, mult) {
-            s.amount0_ui = ui;
+        if adjusted {
+            if let Some(ui) = registry::ui_amount(&s.amount0_adjusted, mult) {
+                s.amount0_ui = ui;
+            }
         }
     }
     if let Some((sym, mult)) = registry::lookup(&s.token1) {
@@ -82,8 +104,10 @@ fn annotate_swap(mut s: pb::Swap) -> pb::Swap {
             s.registry_symbol = sym.to_string();
             s.ui_multiplier = mult.to_string();
         }
-        if let Some(ui) = registry::ui_amount(&s.amount1, mult) {
-            s.amount1_ui = ui;
+        if adjusted {
+            if let Some(ui) = registry::ui_amount(&s.amount1_adjusted, mult) {
+                s.amount1_ui = ui;
+            }
         }
     }
     s
@@ -98,12 +122,37 @@ mod tests {
     const USDG: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
     const MEME: &str = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
+    /// A swap as `map_totals` hands it over: raw int128s AND the decimal-adjusted
+    /// values `attach_usd()` derives from them.
+    ///
+    /// Both spellings are set because the module reads the adjusted pair and the
+    /// raw pair must survive untouched. A fixture that set only `amount0` is what
+    /// let the raw-vs-adjusted bug pass its own test — the code read `amount0`,
+    /// the fixture filled `amount0`, and the assertion matched a number that was
+    /// 1e18 too large on real data.
     fn swap(t0: &str, t1: &str, a0: &str, a1: &str) -> pb::Swap {
+        swap_adjusted(t0, t1, a0, a0, a1, a1)
+    }
+
+    /// The same, with the adjusted values stated independently of the raw ones —
+    /// which is how real rows look, since adjusting divides by `10^decimals` and
+    /// flips the sign.
+    fn swap_adjusted(
+        t0: &str,
+        t1: &str,
+        a0: &str,
+        a0_adj: &str,
+        a1: &str,
+        a1_adj: &str,
+    ) -> pb::Swap {
         pb::Swap {
             token0: t0.to_string(),
             token1: t1.to_string(),
             amount0: a0.to_string(),
             amount1: a1.to_string(),
+            amount0_adjusted: a0_adj.to_string(),
+            amount1_adjusted: a1_adj.to_string(),
+            amounts_adjusted: true,
             ..Default::default()
         }
     }
@@ -126,8 +175,18 @@ mod tests {
     #[test]
     fn crwd_gets_its_four_times_ui_amount() {
         // The case that makes this package worth more than the raw tape.
+        // Raw is the int128 the PoolManager emitted; adjusted is what
+        // attach_usd() derives (-raw / 10^18, hence the sign flip). The UI
+        // amount must come from the adjusted one.
         let ev = pb::Events {
-            swaps: vec![swap(CRWD, USDG, "17.006", "-4000")],
+            swaps: vec![swap_adjusted(
+                CRWD,
+                USDG,
+                "-17006000000000000000",
+                "17.006",
+                "4000000000",
+                "-4000",
+            )],
             ..Default::default()
         };
         let out = filter_stock_events(ev);
@@ -138,7 +197,56 @@ mod tests {
         assert_eq!(s.ui_multiplier, "4.000000000000000000");
         assert!(s.amount0_ui.starts_with("68.02"), "got {}", s.amount0_ui);
         // Raw amounts survive untouched — UI is additive, not a replacement.
-        assert_eq!(s.amount0, "17.006");
+        assert_eq!(s.amount0, "-17006000000000000000");
+    }
+
+    #[test]
+    fn usd_pricing_survives_the_filter() {
+        // The other half of the map_totals dependency: equity rows must keep
+        // the USD figures attach_usd() computed. A filter that rebuilt Swap
+        // field-by-field, or that read map_enriched, would drop these and leave
+        // every equity row unpriced.
+        let mut sw = swap_adjusted(NVDA, USDG, "-1000", "1.0", "2000", "-2.0");
+        sw.amount_usd = "180.42".to_string();
+        sw.priced = true;
+        sw.amount0_usd = "180.42".to_string();
+        sw.amount0_priced = true;
+        sw.native_price_usd = "2400.21".to_string();
+
+        let out = filter_stock_events(pb::Events { swaps: vec![sw], ..Default::default() });
+        let s = &out.swaps[0];
+        assert!(s.priced, "equity rows must stay priced");
+        assert_eq!(s.amount_usd, "180.42");
+        assert_eq!(s.amount0_usd, "180.42");
+        assert_eq!(s.native_price_usd, "2400.21");
+    }
+
+    #[test]
+    fn no_ui_amount_when_the_upstream_left_amounts_unadjusted() {
+        // The map_enriched-vs-map_totals wiring trap. If this module is fed a
+        // stage that has not run attach_usd(), amountN_adjusted is empty and
+        // amounts_adjusted is false. The right behaviour is to emit NO ui
+        // amount — not to fall back to the raw int128, which is the same number
+        // multiplied by 10^decimals and looks entirely plausible.
+        let ev = pb::Events {
+            swaps: vec![pb::Swap {
+                token0: CRWD.to_string(),
+                token1: USDG.to_string(),
+                amount0: "-17006000000000000000".to_string(),
+                amount1: "4000000000".to_string(),
+                amounts_adjusted: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let s = &filter_stock_events(ev).swaps[0];
+        assert!(s.token0_is_stock, "identity still resolves");
+        assert_eq!(s.registry_symbol, "CRWD");
+        assert!(
+            s.amount0_ui.is_empty(),
+            "must not derive a UI amount from the raw int128, got {}",
+            s.amount0_ui
+        );
     }
 
     #[test]
