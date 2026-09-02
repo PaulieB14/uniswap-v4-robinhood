@@ -43,7 +43,7 @@ carrying that pricing through and attaching UI share counts.
 ## Running it
 
 ```bash
-substreams run ./uniswap-v4-robinhood-v0.1.0.spkg map_stock_events \
+substreams run ./uniswap-v4-robinhood-v0.1.1.spkg map_stock_events \
   -e robinhood -s 9070 -t +50000 -o jsonl
 ```
 
@@ -161,12 +161,44 @@ accruals**, with an error that grows with the age of the snapshot. Regenerate
 via `scripts/gen-registry.sh` and re-publish to reset it; read `ui_multiplier`
 on each row to see exactly what was applied.
 
+## Building
+
+**`substreams pack` does not compile.** It packages whatever `.wasm` already
+exists at the path in the manifest's `binaries:` stanza — no staleness check, no
+warning. Edit a `.rs` file, run `substreams pack`, and you ship a package whose
+source and binary disagree.
+
+v0.1.0 shipped exactly that way: three commits of fixes were present in git and
+absent from the wasm, so the published module still dropped every `pool_stats`
+row. `cargo test` did not catch it and could not have — it builds for the *host*,
+so a green suite says nothing about the binary that ships. It surfaced only by
+streaming the published package and comparing its output against an independent
+reimplementation of the filter rule.
+
+`substreams build` is **not** the fix here either: it runs a protobuf codegen
+step that writes `src/pb/mod.rs`, which collides with this package's checked-in
+`src/pb.rs` and fails with `E0761: file for module 'pb' found at both`.
+
+Compile with cargo, then pack. The Makefile does it in the right order:
+
+```bash
+make check     # cargo test -> cargo build --release (wasm32) -> substreams pack -> staleness assert
+make stale     # exits non-zero if any source is newer than the wasm
+make publish   # check, then publish
+```
+
 ## Tests
 
 ```bash
-cargo test --lib     # 111 tests
-substreams build
-substreams pack substreams.yaml
+make check           # cargo test (120 tests) + wasm rebuild + pack + staleness assert
+```
+
+or the pieces, in this order and no other:
+
+```bash
+cargo test --lib                                   # 120 tests, HOST build
+cargo build --target wasm32-unknown-unknown --release
+substreams pack                                    # packs; does NOT compile
 ```
 
 The price maths tests are pinned to real numbers. Where Base fixtures were
@@ -179,13 +211,19 @@ level, not Base specific.
 
 ## Known gaps
 
-- **No module in this package has ever been executed against live Robinhood
-  blocks.** Everything below the wasm boundary is verified — 111 unit tests, and
-  every on-chain PoolManager `topic0` matched against the module's decoders to
-  prove the v4-core ABI is unchanged from Base — but an end-to-end
-  `substreams run` needs a streaming JWT that was not available while this was
-  built. `map_stock_events` in particular has never seen a real block. Treat
-  v0.1.0 as compile- and logic-verified, not runtime-verified.
+- **Verified against live Robinhood blocks** (v0.1.1). `map_stock_events` was
+  streamed over blocks 52,671,295–52,680,794 and 52,644,468–52,653,468 via
+  `robinhood.substreams.pinax.network:443`: 79 equity swaps across 29 pools, of
+  which **79 of 79 UI amounts satisfy `ui == amount_adjusted * multiplier`
+  exactly**, including 23 rows on non-unit multipliers (ORCL x1.002210914971013375,
+  ASML x1.000101323251417769) with signs preserved. 50 of 52 swaps in the second
+  window carried USD.
+
+  The caveat on those runs: to fit the token's 10,000-block processing cap,
+  `initialBlock` was moved to the window start, so `store_pools` only knows pools
+  initialised inside the window and anything older is invisible to it. That
+  restricts *which* pools appear; it does not change the arithmetic on the ones
+  that do. A full-history run from block 9070 has not been done.
 - V4 event density here is **comparable to Base, not sparser**: 14 of 15 blocks
   sampled across ~1,450 recent blocks carried PoolManager logs (93%), averaging
   9.67 logs per block, against Base's 148/148. That is why this port keeps Base's

@@ -3,3 +3,6 @@
 target/
 *.spkg
 test-manifest.local.yaml
+
+# substreams build codegen; collides with the checked-in src/pb.rs
+src/pb/
