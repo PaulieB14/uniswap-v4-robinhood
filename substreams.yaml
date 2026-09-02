@@ -1,0 +1,234 @@
+specVersion: v0.1.0
+package:
+  name: uniswap_v4_base
+  version: v0.1.4
+  url: https://github.com/PaulieB14/uniswap-v4-substreams
+  image: ./icon.png
+  description: >
+    Uniswap V4 on Base, converted from the uniswap-v4-base-3 subgraph
+    (Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB). Adds hook permission
+    decoding from the low 14 bits of the hook address, the per-swap effective
+    fee (which the subgraph overwrites), the ModifyLiquidity salt, and full
+    position ownership history — none of which the source subgraph exposes.
+    Adds an explicit pool store so a Swap row carries its own tokens: a V4
+    Swap log emits only the poolId, and the tokens/fee/tickSpacing/hook live in
+    the PoolKey that was hashed away at initialize. store_pools remembers every
+    Initialize and map_enriched joins it back onto every swap and liquidity
+    row, plus per-block PoolStats and HookStats.
+
+network: base
+
+imports:
+  database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
+  sql: https://github.com/streamingfast/substreams-sink-sql/releases/download/protodefs-v1.0.7/substreams-sink-sql-protodefs-v1.0.7.spkg
+  # Block-level skip (eth_common:filtered_events) deliberately NOT used.
+  # Measured, not assumed: 148 of 148 sampled Base blocks contain V4 activity —
+  # 100%. A block-index filter is a cost win only for SPARSE targets; here it
+  # would skip nothing and buy a dependency plus a footgun (it takes one
+  # evt_addr and this package watches three contracts).
+
+protobuf:
+  files:
+    - uniswap/v4/v1/uniswap.proto
+  importPaths:
+    - ./proto
+  excludePaths: [sf/substreams, google]
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ./target/wasm32-unknown-unknown/release/uniswap_v4_substreams.wasm
+
+modules:
+  # ---------------------------------------------------------------------------
+  # initialBlock is the PoolManager's deployment block, carried over from the
+  # subgraph's startBlock, and it is set to the SAME value on every module. Two
+  # reasons it must not drift: a module whose initialBlock is above its input's
+  # silently produces nothing for the gap, and — specific to this package —
+  # store_pools starting late would miss Initialize events, so map_enriched
+  # would emit permanently un-enriched swaps for those pools with no error.
+  #
+  # The live subgraph GRAFTS at 26990278, meaning it never indexed its own early
+  # history. This backfills the real range in parallel instead. That is also
+  # what makes enrichment COMPLETE rather than best-effort here: no V4 pool on
+  # Base predates 25350988, so an empty token0 on a swap row means a genuine
+  # bug or a partial-range run, never "the pool is too old".
+  # ---------------------------------------------------------------------------
+
+  # Stage 1 — decode. Store-free and therefore independently cacheable, which is
+  # why it stays a public module instead of being folded into map_enriched: a
+  # consumer that wants raw logs pays nothing for the join, and re-running the
+  # join does not re-decode the chain.
+  - name: map_events
+    kind: map
+    initialBlock: 25350988
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:uniswap.v4.v1.Events
+
+  # Stage 2 — remember. One entry per pool, written once at Initialize, keyed
+  # "pool:<poolId>" (src/store_pools.rs owns both the writer and the pool_key
+  # builder that map_enriched reads with).
+  #
+  # updatePolicy: set + valueType proto:uniswap.v4.v1.Pool — the whole Pool
+  # record is needed downstream (including the 17-field HookPermissions
+  # submessage), so this reuses the prost encoding the proto already defines
+  # rather than inventing a second, schemaless delimited format whose writer and
+  # reader live in different modules.
+  - name: store_pools
+    kind: store
+    updatePolicy: set
+    valueType: proto:uniswap.v4.v1.Pool
+    initialBlock: 25350988
+    inputs:
+      - map: map_events
+
+  # Stage 3 — join. Input order MUST match the map_enriched signature in
+  # src/enrich.rs: (events, store). mode: get gives StoreGetProto<Pool>; the
+  # handler uses get_last, so a pool initialised and swapped in the SAME block
+  # (routinely the same transaction) still resolves — the store module for block
+  # N completes before any map depending on it runs for block N.
+  - name: map_enriched
+    kind: map
+    initialBlock: 25350988
+    inputs:
+      - map: map_events
+      - store: store_pools
+        mode: get
+      - store: store_tokens
+        mode: get
+    output:
+      type: proto:uniswap.v4.v1.Events
+
+  # ERC-20 metadata for the currencies a pool was initialised with. String
+  # store, "symbol<US>name<US>decimals<US>flags"; the flags field marks whether
+  # decimals was MEASURED or defaulted to 18 — never scale money by a defaulted
+  # value. This is the only module in the package that issues eth_calls, and it
+  # store_tokens IS on the critical path: db_out <- map_totals <- map_enriched
+    # <- store_tokens. An earlier comment here claimed the opposite ("nothing
+    # consumes it yet"), which stopped being true when enrichment started
+    # attaching symbols. Every module therefore blocks on synchronous eth_call.
+  - name: store_tokens
+    kind: store
+    updatePolicy: set
+    valueType: string
+    initialBlock: 25350988
+    inputs:
+      - map: map_events
+
+  # ---------------------------------------------------------------------------
+  # Stage 3b — ACCUMULATE. Lifetime totals for pools and hooks.
+  #
+  # These exist because pool_stats/hook_stats from map_enriched are per-block
+  # DELTAS and a `map` cannot be anything else: parallel backfill re-executes it
+  # out of order, so it has nowhere to keep a carry. An add-policy STORE can,
+  # and is the only structure here that is safe to accumulate in — the engine
+  # re-derives a store from a known base snapshot on every replay, so running a
+  # block twice yields the same total, whereas a sink-side
+  # `UPDATE … SET n = n + d` has no idea which blocks are already in the number
+  # and drifts permanently. Full argument in src/stats_store.rs.
+  #
+  # updatePolicy: add + valueType: bigint. bigint, not int64: these keys hold
+  # uint256 volume sums as well as counts, and int64 would wrap on the first
+  # 18-decimal token.
+  # ---------------------------------------------------------------------------
+
+  # Per-pool. Reads map_events, NOT map_enriched: a pool delta needs only
+  # pool_id and the amounts, which are on the raw row, so this store stays off
+  # the store_pools/store_tokens dependency (and off store_tokens' eth_calls).
+  # The counts are identical either way — enrichment fills fields, it never adds
+  # or removes a row.
+  - name: store_pool_totals
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    initialBlock: 25350988
+    inputs:
+      - map: map_events
+
+  # Per-hook. MUST read map_enriched: a raw Swap log carries only the poolId, so
+  # the hook is not on the row until store_pools has been joined onto it.
+  - name: store_hook_totals
+    kind: store
+    updatePolicy: add
+    valueType: bigint
+    initialBlock: 25350988
+    inputs:
+      - map: map_enriched
+
+  # Stage 3c — READ BACK. Emits the current lifetime total for every pool/hook
+  # the block touched, into Events.pool_totals / Events.hook_totals, and passes
+  # everything else through unchanged.
+  #
+  # Input order MUST match the map_totals signature in src/stats_store.rs:
+  # (events, pool_totals, hook_totals). Both stores are StoreGetBigInt, so
+  # swapping the two store lines compiles and runs and silently reports every
+  # total as 0 — the pool:/hook: key prefixes are what make that detectable.
+  #
+  # Not yet on the db_out path: db_out still consumes map_enriched, because
+  # db/schema.sql has no pool_totals/hook_totals tables and src/db_out.rs has no
+  # writers for them (both owned elsewhere). Once they exist, adopting the
+  # totals is one line — point db_out's input at map_totals. It is a strict
+  # superset of map_enriched's output, so nothing already written changes.
+  - name: store_prices
+    kind: store
+    updatePolicy: set
+    valueType: string
+    initialBlock: 25350988
+    inputs:
+      - map: map_enriched
+
+  - name: map_totals
+    kind: map
+    initialBlock: 25350988
+    inputs:
+      - map: map_enriched
+      - store: store_pool_totals
+        mode: get
+      - store: store_hook_totals
+        mode: get
+      - store: store_prices
+        mode: get
+    output:
+      type: proto:uniswap.v4.v1.Events
+
+  # ---------------------------------------------------------------------------
+  # Stage 3d — PRICE. Native price in USD plus each whitelisted token's price in
+  # native, the port of the subgraph's Bundle/derivedETH (src/pricing.rs).
+  #
+  # MUST read map_enriched, not map_events: pricing needs the token addresses
+  # and their decimals ON the row, and a raw V4 Swap log carries only the
+  # poolId. Those fields are exactly what map_enriched joins on from
+  # store_pools and store_tokens.
+  #
+  # It also means this module inherits store_tokens' `decimals_measured` flag,
+  # which is the whole safety property — an unmeasured decimals value produces
+  # NO price rather than one that is wrong by a power of ten.
+  #
+  # updatePolicy: set + valueType: string — a price is current state, so every
+  # observation replaces the last. Values are
+  # "price<US>native_locked<US>source_pool<US>block"; the block field is the
+  # staleness handle, because a set store happily serves a price from ten
+  # thousand blocks ago if the source pool has not traded since.
+  #
+  # Zero RPC: everything is arithmetic over fields already on the row.
+  # ---------------------------------------------------------------------------
+
+  - name: db_out
+    kind: map
+    initialBlock: 25350988
+    inputs:
+      # map_totals, NOT map_enriched. totals() passes the whole block through and
+      # appends PoolTotals/HookTotals, so reading map_enriched here would silently
+      # drop every running-total row — the same dead-branch defect store_tokens had.
+      - map: map_totals
+    output:
+      type: proto:sf.substreams.sink.database.v1.DatabaseChanges
+
+sink:
+  module: db_out
+  type: sf.substreams.sink.sql.v1.Service
+  config:
+    schema: ./db/schema.sql
+    engine: postgres
