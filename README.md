@@ -195,6 +195,14 @@ level, not Base specific.
   enough to be representative.)
 - Historical multipliers, and snapshot drift on accruing names (both above).
 - No PositionManager or Arrakis (above).
+- **The SQL sink carries no equity columns.** `db_out` consumes `map_totals`,
+  which sits *upstream* of `map_stock_events`, so `token0_is_stock`,
+  `registry_symbol`, `amount0_ui`/`amount1_ui` and `ui_multiplier` never reach
+  Postgres — `db/schema.sql` has no columns for them and does not pretend to.
+  The equity view is a stream-consumer feature in v0.1.0: read
+  `map_stock_events` directly. Sinking it would need a second `db_out` over the
+  filtered stream plus the matching DDL, which is deliberately not attempted
+  here rather than half-done.
 - `map_stock_events` emits no block-level aggregates. `pool_stats` / `hook_stats`
   are computed across the whole chain upstream, and carrying them into the
   filtered view would label whole-chain totals as equity totals.

@@ -257,6 +257,13 @@ modules:
       # map_totals, NOT map_enriched. totals() passes the whole block through and
       # appends PoolTotals/HookTotals, so reading map_enriched here would silently
       # drop every running-total row — the same dead-branch defect store_tokens had.
+      #
+      # Deliberately NOT map_stock_events: this sink is the whole-chain view, and
+      # pointing it at the filtered stream would silently narrow every existing
+      # table to equity rows. The consequence is that the equity annotations
+      # (token*_is_stock, registry_symbol, amount*_ui, ui_multiplier) never reach
+      # Postgres — db/schema.sql has no columns for them. Sinking the equity view
+      # needs a second db_out plus DDL; see the README's Known gaps.
       - map: map_totals
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges

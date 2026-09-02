@@ -220,6 +220,13 @@ message Swap {
   // The multiplier applied, so a consumer can audit the arithmetic rather than
   // trust it.
   //
+  // ONE FIELD, AND A POOL CAN HAVE TWO STOCK LEGS. When both tokens are
+  // registry assets each leg is scaled by its OWN multiplier, but only token0's
+  // is reported here — the same token0-wins rule as `registry_symbol`, and the
+  // same caveat: this is a convenience, not a complete description. For a
+  // stock/stock pool, `amount1_ui` was computed with token1's multiplier, which
+  // is not this value. Look it up by address if you need to re-derive it.
+  //
   // A PLAIN DECIMAL, written to 18 places — CRWD is "4.000000000000000000",
   // meaning 4.0, not 4e18. It is NOT 1e18-scaled despite the fixed width, and
   // dividing by 1e18 to "unscale" it produces ~4e-18 and silently zeroes every

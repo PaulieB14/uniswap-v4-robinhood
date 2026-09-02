@@ -100,6 +100,10 @@ fn annotate_swap(mut s: pb::Swap) -> pb::Swap {
         // A stock/stock pool has two tickers and one field. token0 wins, and
         // the flags remain the complete answer — registry_symbol is a
         // convenience, not the identity.
+        //
+        // Same for ui_multiplier: amount1_ui below is scaled by token1's own
+        // multiplier, so on a stock/stock pool the reported ui_multiplier
+        // describes amount0_ui only. Documented on the proto field.
         if s.registry_symbol.is_empty() {
             s.registry_symbol = sym.to_string();
             s.ui_multiplier = mult.to_string();
@@ -198,6 +202,25 @@ mod tests {
         assert!(s.amount0_ui.starts_with("68.02"), "got {}", s.amount0_ui);
         // Raw amounts survive untouched — UI is additive, not a replacement.
         assert_eq!(s.amount0, "-17006000000000000000");
+    }
+
+    #[test]
+    fn a_stock_stock_pool_scales_each_leg_by_its_own_multiplier() {
+        // CRWD (4.0) against NVDA (1.0). Each leg must use its own multiplier;
+        // reusing token0's for both would quadruple the NVDA side.
+        let out = filter_stock_events(pb::Events {
+            swaps: vec![swap_adjusted(CRWD, NVDA, "-1", "17.006", "1", "-2.5")],
+            ..Default::default()
+        });
+        let s = &out.swaps[0];
+        assert!(s.token0_is_stock && s.token1_is_stock);
+        assert!(s.amount0_ui.starts_with("68.02"), "CRWD x4: {}", s.amount0_ui);
+        assert!(s.amount1_ui.starts_with("-2.5"), "NVDA x1: {}", s.amount1_ui);
+        // token0 wins the single reporting field, so it describes amount0_ui
+        // and NOT amount1_ui. This is the documented limitation, asserted so a
+        // future change to the tie-break cannot pass silently.
+        assert_eq!(s.registry_symbol, "CRWD");
+        assert_eq!(s.ui_multiplier, "4.000000000000000000");
     }
 
     #[test]
