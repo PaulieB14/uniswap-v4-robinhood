@@ -29,6 +29,9 @@ use crate::abi;
 use crate::pb::uniswap::v4::v1 as pb;
 
 /// PositionManager on Base (startBlock 25350993).
+// BASE-ONLY — not wired on Robinhood. Uniswap has published no PositionManager
+// for chain 4663; this address is the Base deployment and is left here so the
+// module still compiles and its tests still run. See map_events in lib.rs.
 const POSITION_MANAGER: [u8; 20] = hex_literal::hex!("7C5f5A4bBd8fD63184577525326123B519429bDc");
 
 pub fn extract(blk: &Block, events: &mut pb::Events) {

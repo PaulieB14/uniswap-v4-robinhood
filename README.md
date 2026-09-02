@@ -1,168 +1,163 @@
-<img src="icon.png" width="72" align="right" alt="Uniswap"/>
+# uniswap-v4-robinhood
 
-# uniswap-v4-substreams
+Enriched Uniswap **V4** on Robinhood Chain (Arbitrum Orbit L2, chain id **4663**),
+filtered to the official Robinhood Stock Token registry.
 
-Uniswap V4 on **Base** as a Substreams package, converted from **`uniswap-v4-base-3`**
-(`Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB`) — the busiest subgraph on The Graph.
+Ported from [`uniswap-v4-base@v0.1.4`](https://github.com/PaulieB14/uniswap-v4-substreams).
 
-Built with StreamingFast's [`substreams-convert`](https://github.com/streamingfast/substreams-skills).
+## What this is
 
-Every claim below is verified against at least one of: the chain (`eth_call` / `eth_getLogs` /
-`extsload`), the deployed subgraph, or a live `substreams run`. Anything unverified is in
-**Known gaps**, not here.
+The equity subset of Uniswap V4 on Robinhood Chain, correctly identified and
+correctly scaled.
 
-## It finds a real bug in the source subgraph
+## What this is not
 
-The subgraph runs `pool.feeTier = event.params.fee` on every swap, so a pool's *configured* fee is
-overwritten by whatever the last swap charged. On pool `0x0a1e0f12…` (ETH/$SXR):
+**Not a raw-events clone.** Uniswap Labs already publishes
+`uniswap-database-changes-pools-robinhood`, which has the undecorated v2/v3/v4
+tape. If you want raw logs, use that.
 
-| source | fee |
+**Not the Base package pointed at a new RPC.** Most DEX volume on this chain is
+memecoins. A V4 port with no registry filter indexes noise.
+
+What this adds on top of the raw tape: hook permission decoding from the low 14
+bits of the hook address, the per-swap effective fee, the `ModifyLiquidity`
+salt, and an explicit pool store — a V4 `Swap` log carries only the `poolId`,
+because the tokens, fee, tickSpacing and hook live in the `PoolKey` that was
+hashed away at `Initialize`. `store_pools` remembers every `Initialize` and
+`map_enriched` joins it back onto every swap and liquidity row.
+
+Then `map_stock_events` keeps only the pools that are actually equity markets.
+
+## Modules
+
+| Module | What it gives you |
 |---|---|
-| `Initialize` event at creation, block 49150754 | **3000** |
-| live `extsload` slot0 `lpFee` | **3000** |
-| subgraph `pool.feeTier` | **3499** |
+| `map_events` | The complete, unfiltered V4 tape. Debug against this. |
+| `map_enriched` | Same rows with tokens, symbols, fee tier, hook permissions joined on. |
+| **`map_stock_events`** | **The equity subset, with ERC-8056 UI amounts. This is the point.** |
+| `db_out` | Postgres sink over the enriched stream. |
 
-That pool has `hooks = 0x000…000`, so dynamic fees are impossible and the fee is immutable in its
-`PoolKey`. Wrong across 3,060 transactions. A second pool (`0x36d7043e…`, VVV/cbBTC) shows the same
-3499-vs-3000 discrepancy, so it is systematic.
-
-This package keeps `pool.fee_tier` (configured, from `Initialize`) and `swap.fee` (effective,
-per-swap, hook-overridable) as separate columns.
-
-## What else it does that the subgraph doesn't
-
-**Hook permissions decoded from the hook address.** V4 mines addresses so a hook's capability set
-lives in its low 14 bits — 14 booleans per pool, no RPC, correct for a hook nobody has seen.
-Verified against live Base hooks (`0x9ea93273…` → flags 4160 → `after_initialize` + `after_swap`).
-The subgraph stores `hooks` as an opaque string plus one hardcoded `ArrakisHook` entity.
-
-**Real `gasUsed`.** Every subgraph swap row carries `gasUsed: "0"` — it hardcodes it, with its own
-TODO in the source.
-
-**ERC-6909 claim tokens.** V4's flash-accounting rail. 292 rows in a 400-block sample; the
-subgraph does not index them at all.
-
-**`salt` retained**, so two salted positions by one sender on one tick range stay distinguishable.
-
-**Self-describing rows.** A V4 `Swap` log carries only a `poolId`. `store_pools` records each pool
-at creation and `map_enriched` denormalises `token0`/`token1`/`fee_tier`/`tick_spacing`/`hook` back
-onto every swap and liquidity event, so a row stands alone.
-
-**Token metadata** — symbol, name, decimals via batched `eth_call`, cached once per token.
-Cross-checked against a direct `eth_call`: token `0xe7fd1ba7…` reports `siddesh`, exact match.
-
-**Lifetime totals and per-block deltas, both.** `pool_stats`/`hook_stats` are per-block deltas that
-SUM over a range; `pool_totals`/`hook_totals` are lifetime figures from add-policy stores. The
-accumulation lives in the store, not in SQL, because a substreams store is deterministic and
-re-derived — a block replayed by a parallel backfill worker does not double-add, whereas
-`UPDATE ... = col + n` would.
-
-**No graft.** The live subgraph grafts at block 26990278 and never indexed its own early history.
-
-## Verified
-
-`substreams run db_out`, 400 Base blocks from 35000000:
-
-| table | rows |
-|---|---|
-| modify_liquidity | 19,007 |
-| pool | 2,970 |
-| swap | 2,745 |
-| pool_stats / pool_totals | 1,655 / 1,655 |
-| claim_token_event | 292 |
-| hook_stats / hook_totals | 184 / 184 |
-| position / position_event | 34 / 34 |
-
-`cargo test --lib` — **92 passing**, including price maths pinned against chain `extsload` *and*
-the deployed subgraph on the asymmetric-decimals case (VVV/cbBTC, 18 vs 8): computed
-`token0Price` 4676.0682880466 against the subgraph's 4676.06828804666294…
-
-## Run
-
-Published: https://substreams.dev/packages/uniswap-v4-base
+## Running it
 
 ```bash
-# Use the full URL. The short reference the registry advertises
-# (uniswap-v4-base@v0.1.1) does not resolve in CLI 1.18.4 — that affects every
-# package in the registry, not just this one.
-substreams gui https://spkg.io/v1/packages/uniswap-v4-base/v0.1.1
+substreams run ./uniswap-v4-robinhood-v0.1.0.spkg map_stock_events \
+  -e robinhood -s 9070 -t +50000 -o jsonl
 ```
 
+`-e robinhood` (or `robinhood.substreams.pinax.network:443`). **Every module
+starts at block 9070** — the block the PoolManager was deployed. A relative
+stop (`-t +N`) needs an absolute start; `--start-block -1` with `+N` fails.
+
+Do not run `db_out` or `map_enriched` from 9070 to head on a small quota.
+`store_pools` must see every `Initialize` or the pools it missed are
+permanently un-enriched, so a production backfill is long by construction. A
+*local* test manifest may raise `initialBlock`; never ship one that does.
+
+## Addresses
+
+All verified against chain 4663 via `eth_getCode` / `symbol()` / `decimals()` on
+2026-09-02, not copied from documentation.
+
+| What | Address | |
+|---|---|---|
+| Uniswap V4 PoolManager | `0x8366a39CC670B4001A1121B8F6A443A643e40951` | 24,009 bytes of code; deployed block 9070 |
+| WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` | `symbol() = WETH`, 18 decimals |
+| USDG | `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` | `symbol() = USDG`, **6 decimals** |
+| Native sentinel | `0x0000000000000000000000000000000000000000` | V4 native currency |
+
+**PositionManager and the Arrakis hook factory are not wired.** Uniswap has
+published no PositionManager for this chain. The Base addresses are still in
+`src/position_manager.rs` and `src/arrakis.rs`, marked BASE-ONLY and not called
+from `map_events` — pointing them at a chain they were not deployed on would
+either no-op or, worse, silently decode whatever unrelated contract occupies
+those addresses.
+
+## USD pricing
+
+**Anchored.** `STABLECOIN_NATIVE_POOL_ID` is
+`0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593` — the
+WETH/USDG pool at fee 500 / tickSpacing 10 / no hook, initialized at block
+8,793,983.
+
+That pool was not guessed. There are **134** WETH/USDG pools on this
+PoolManager; over the 200k blocks to 52,625,973 this one took **917 swaps**
+against 128 for the next busiest and zero for the rest. Its latest
+`sqrtPriceX96` prices 1 WETH at **2,400.21 USDG**, which is the check that
+matters — a bad anchor poisons every other price in the package, silently.
+
+`STABLECOIN_IS_TOKEN0` is `false`: all 134 pools have `currency0 = WETH`.
+
+**Filter on the `priced` flags, never on `amount_usd > 0`.** A genuine zero-value
+swap and an unpriced leg are different things.
+
+## Stock Tokens
+
+Identity is the **contract address**. Never the ticker.
+
+Searching the explorer for `GME` returns the official token *and* impersonators,
+some flagged `is_verified_via_admin_panel: true`. Robinhood's own docs are
+explicit: *"a token with a matching name/ticker but a different contract address
+is not a Robinhood Stock Token."* Nothing in this package reads `symbol()`.
+
+`registry/registry.json` holds 194 tokens, all `chainId: 4663`, snapshotted
+2026-09-02. Regenerate:
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+./scripts/gen-registry.sh          # -> registry/registry.json
+python3 scripts/gen-registry-rs.py # -> src/registry_data.rs
+```
+
+The API returns an **object with an `assets` key**, not a bare array — a `jq`
+of `.[] | .deployments[]?` silently yields nothing.
+
+### ERC-8056 UI amounts
+
+A raw ERC-20 balance is not the share count after a corporate action. Each
+asset carries a `currentMultiplier`, and:
+
+```
+ui_amount = raw * multiplier
+```
+
+**Not `raw * multiplier / 1e18`.** The registry publishes the multiplier as a
+plain decimal written to 18 places — CRWD is `"4.000000000000000000"`, meaning
+**4.0**, not 4e18. Reading those eighteen zeros as a fixed-point scale turns
+17.006 CRWD into 6.8e-17 instead of 68.024 — wrong by exactly the factor you
+were correcting for. AAPL's `"1.000566080061092436"` settles it: a small split
+adjustment as a decimal, meaningless as a 1e18-scaled integer.
+
+CRWD is the case to remember. The explorer shows 17.006 where the holder has
+~68 shares. Raw amounts are preserved unchanged in `amount0` / `amount1`; UI
+amounts are additive fields, and empty means *not a registry token*, never 1.0.
+
+**Multipliers are current, not historical.** A swap dated before the last
+multiplier change is scaled by today's multiplier, so this is **not
+corporate-action-correct for historical dates**. The token contracts emit
+`UIMultiplierUpdated`; decoding that per-token is the fix and is not done here.
+
+## Tests
+
+```bash
+cargo test --lib     # 111 tests
+substreams build
 substreams pack substreams.yaml
-substreams run ./uniswap-v4-base-v0.1.0.spkg map_enriched \
-  -e base-mainnet.streamingfast.io:443 -s 25350988 -t +9000 -o jsonl
 ```
 
-Postgres sink (chosen over ClickHouse because `pool` is mutable current state and ClickHouse is
-insert-only):
+The price maths tests are pinned to real numbers. Where Base fixtures were
+chain-specific they were retargeted, not deleted — `ALT_TOKEN` replaces Base's
+ZORA as "a whitelist token that is neither native nor a stablecoin", which on
+this chain is a registry stock token.
 
-```bash
-substreams-sink-sql setup "$DSN" ./uniswap-v4-base-v0.1.0.spkg
-substreams-sink-sql run   "$DSN" ./uniswap-v4-base-v0.1.0.spkg
-```
-
-Note: v4 delta operations require a recent `substreams-sink-sql`; an older binary silently ignores
-them.
-
-
-### Sinking: check `cursors`, not the exit code
-
-`substreams-sink-sql` 4.13.1 flushes on a block interval (default 1000) and **drops the final
-partial batch on a bounded run**, then exits 0 with `substreams ended correctly`. Measured on a
-10,000-block run: it reported reaching `#34999999` while `last_block_written` was `#34999001` —
-**998 blocks, 6,372 swaps and 50,315 modify_liquidity rows silently missing**, exit code 0.
-
-Re-running the identical command does not heal it: the stored cursor wins over the requested
-start, the sink streams the missing blocks, flushes nothing, and terminates gracefully with
-byte-identical row counts.
-
-Either run unbounded, pad the stop block to `initialBlock + k x flush_interval`, or force a flush
-every block:
-
-```bash
-substreams-sink-sql run "$DSN" ./pkg.spkg <start>:<stop> \
-  -e base-mainnet.streamingfast.io:443 \
-  --batch-block-flush-interval 1 --batch-row-flush-interval 0
-```
-
-And verify completion from the database, which is the only honest signal:
-
-```sql
-SELECT block_num FROM cursors;   -- must equal your stop block
-```
-
-### Totals are window-scoped, not lifetime
-
-`pool_totals` / `hook_totals` accumulate in an `add`-policy store that starts at zero at the
-module's `initialBlock`. They are true lifetime figures **only** when run from the shipped
-`initialBlock: 25350988`. Lower it to test at a recent block and they silently become "since the
-window started", with nothing on the row to say so. Enriched swap rows at least carry the
-`token0 = ''` sentinel; totals have no equivalent.
+The fee_tier vs `swap.fee` regression tests are kept. That bug is protocol
+level, not Base specific.
 
 ## Known gaps
 
-- **USD pricing is wired but unproven at scale.** `store_prices` maintains the native price off
-  the hardcoded WETH/USDC anchor and `map_totals` attaches `amount0_usd` / `amount1_usd` /
-  `amount_usd` / `native_price_usd` / `priced`. The maths is pinned by tests against chain
-  `extsload` and the subgraph (anchor computes 2445.38 USD/ETH against the subgraph's 2436.70,
-  0.36% apart — ETH moving between reads). What is NOT demonstrated is a populated USD column over
-  a real range: that needs the price store built from block 25350988, which exceeds the
-  10,000-block request limit on this tier. Filter on `priced`, never on `amount_usd > 0` — an
-  unanchored swap and a genuinely zero-value swap both read 0.
-- **Only anchorable swaps get a USD value**, by design: a stablecoin leg, a native leg, or a
-  whitelisted token with a derived-native price. Everything else stays unpriced rather than
-  routed through an arbitrary intermediate.
-- **Swap amount signs are raw on-chain (swapper-centric).** The subgraph negates to pool-centric
-  *and* divides by decimals, so rows are sign-flipped versus it.
-- **`Donate` and `ProtocolFeeUpdated` decoders are present but unexercised.** Zero rows in the
-  400-block sample — and confirmed by `eth_getLogs` that zero such events occurred on chain in that
-  range, so this is absence of data, not a broken decoder. Untested in production.
-- **No block-index filter, deliberately.** 148 of 148 sampled blocks contain V4 activity, so
-  `eth_common:filtered_events` would skip nothing.
-- **Testing store-backed modules at a recent block needs quota.** Reading `store_pools` at block
-  35000000 requires building the store from 25350988 — 9.65M blocks against a 10,000-block request
-  limit. Verification above used a temporary manifest with `initialBlock` moved forward; the
-  shipped manifest starts at 25350988 and sees every pool.
+- No live stream verification in this repo's history: the ABI was proven correct
+  by matching every on-chain PoolManager topic0 against the module's decoders,
+  but an end-to-end `substreams run` needs a Graph Market JWT.
+- Historical multipliers (above).
+- No PositionManager or Arrakis (above).
+- `map_stock_events` emits no block-level aggregates. `pool_stats` / `hook_stats`
+  are computed across the whole chain upstream, and carrying them into the
+  filtered view would label whole-chain totals as equity totals.

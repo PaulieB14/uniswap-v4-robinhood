@@ -172,6 +172,40 @@ message Swap {
   // unanchored. Filter on these, not on amount0_usd <> 0.
   bool   amount0_priced = 29;
   bool   amount1_priced = 30;
+
+  // ---- fields 31-36: Robinhood Stock Token layer (additive) ----------------
+  // Set by map_stock_events after store_pools has joined token0/token1 on.
+  // Absent (false / empty) on every non-equity pool and on the raw map_events
+  // output, which stays a complete V4 tape.
+
+  // Whether each leg is an address in the official RHJ registry
+  // (https://api.robinhood.com/rhj/assets, chainId 4663). Address identity
+  // only: the explorer returns impersonator tokens for a ticker search, some
+  // of them flagged verified, so symbol() is never consulted.
+  bool   token0_is_stock = 31;
+  bool   token1_is_stock = 32;
+
+  // Registry ticker of whichever leg is a stock token, for convenience. Empty
+  // when neither leg is. Never use this for identity — it is derived FROM the
+  // address, not the other way round.
+  string registry_symbol = 33;
+
+  // ERC-8056 UI amounts: raw * currentMultiplier / 1e18, as decimal strings.
+  //
+  // These are the share counts a human recognises. A raw amount is wrong after
+  // a corporate action — CRWD's multiplier is 4.0, so raw units understate the
+  // position by 4x, and the block explorer shows 17.006 where the holder has
+  // ~68 shares. Raw amounts are kept unchanged in amount0/amount1; these are
+  // strictly additive.
+  //
+  // Empty when the leg is not a registry token, or when no multiplier is
+  // known. Empty is not 1.0 — do not substitute.
+  string amount0_ui = 34;
+  string amount1_ui = 35;
+
+  // The multiplier applied, so a consumer can audit the arithmetic rather than
+  // trust it. Decimal string, 1e18-scaled as the registry publishes it.
+  string ui_multiplier = 36;
 }
 
 message ModifyLiquidity {

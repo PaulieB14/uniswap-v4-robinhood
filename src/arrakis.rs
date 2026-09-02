@@ -21,6 +21,8 @@ use crate::pb::uniswap::v4::v1 as pb;
 
 /// ArrakisHookFactory on Base (startBlock 28450225).
 const ARRAKIS_HOOK_FACTORY: [u8; 20] =
+    // BASE-ONLY — not wired on Robinhood. Arrakis has no known hook factory on
+    // chain 4663; this is the Base address. See map_events in lib.rs.
     hex_literal::hex!("eF129a430032C8183abA158C1a70799e3b840dF9");
 
 /// Which factory minted the hook. The proto keeps this a string rather than an

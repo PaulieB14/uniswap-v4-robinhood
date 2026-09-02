@@ -1,5 +1,5 @@
 [package]
-name = "uniswap-v4-substreams"
+name = "uniswap-v4-robinhood"
 version = "0.1.0"
 edition = "2021"
 

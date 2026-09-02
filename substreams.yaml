@@ -1,22 +1,32 @@
 specVersion: v0.1.0
 package:
-  name: uniswap_v4_base
-  version: v0.1.4
-  url: https://github.com/PaulieB14/uniswap-v4-substreams
+  name: uniswap_v4_robinhood
+  version: v0.1.0
+  url: https://github.com/PaulieB14/uniswap-v4-robinhood
   image: ./icon.png
   description: >
-    Uniswap V4 on Base, converted from the uniswap-v4-base-3 subgraph
-    (Qmbsc6XQWbiv4DfLVfaNciScqYLyDWUYjWzrFBbzzmRsMB). Adds hook permission
-    decoding from the low 14 bits of the hook address, the per-swap effective
-    fee (which the subgraph overwrites), the ModifyLiquidity salt, and full
-    position ownership history — none of which the source subgraph exposes.
-    Adds an explicit pool store so a Swap row carries its own tokens: a V4
-    Swap log emits only the poolId, and the tokens/fee/tickSpacing/hook live in
-    the PoolKey that was hashed away at initialize. store_pools remembers every
-    Initialize and map_enriched joins it back onto every swap and liquidity
-    row, plus per-block PoolStats and HookStats.
+    Uniswap V4 on Robinhood Chain (Arbitrum Orbit L2, chain id 4663), enriched
+    and filtered to the official Robinhood Stock Token registry.
 
-network: base
+    Two things this is not. It is not a raw-events clone: Uniswap Labs already
+    ships uniswap-database-changes-pools-robinhood with the undecorated v2/v3/v4
+    tape. And it is not the Base package retargeted and left there — most DEX
+    volume on this chain is memecoins, so an unfiltered V4 port indexes noise.
+
+    What it adds on top of the raw tape: hook permission decoding from the low
+    14 bits of the hook address, the per-swap effective fee, the ModifyLiquidity
+    salt, and an explicit pool store, because a V4 Swap log carries only the
+    poolId — the tokens, fee, tickSpacing and hook live in the PoolKey that was
+    hashed away at Initialize. store_pools remembers every Initialize and
+    map_enriched joins it back onto every swap and liquidity row.
+
+    On top of that, map_stock_events keeps only pools touching an address in the
+    official RHJ registry (https://api.robinhood.com/rhj/assets, chainId 4663),
+    with WETH/USDG/native allowed as quote legs. Identity is the contract
+    address, never the ticker: the explorer returns impersonator tokens for a
+    symbol search, some of them flagged verified.
+
+network: robinhood
 
 imports:
   database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
@@ -37,7 +47,7 @@ protobuf:
 binaries:
   default:
     type: wasm/rust-v1
-    file: ./target/wasm32-unknown-unknown/release/uniswap_v4_substreams.wasm
+    file: ./target/wasm32-unknown-unknown/release/uniswap_v4_robinhood.wasm
 
 modules:
   # ---------------------------------------------------------------------------
@@ -61,7 +71,7 @@ modules:
   # join does not re-decode the chain.
   - name: map_events
     kind: map
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - source: sf.ethereum.type.v2.Block
     output:
@@ -80,7 +90,7 @@ modules:
     kind: store
     updatePolicy: set
     valueType: proto:uniswap.v4.v1.Pool
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_events
 
@@ -91,13 +101,28 @@ modules:
   # N completes before any map depending on it runs for block N.
   - name: map_enriched
     kind: map
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_events
       - store: store_pools
         mode: get
       - store: store_tokens
         mode: get
+    output:
+      type: proto:uniswap.v4.v1.Events
+
+  # The equity subset: pools whose legs are all in the official RHJ registry
+  # (plus WETH/USDG/native as quotes), with ERC-8056 UI amounts attached.
+  #
+  # This is the module that makes the package worth more than Uniswap Labs'
+  # raw tape. map_events above stays complete and unfiltered so it remains
+  # debuggable; the filtering happens here, after store_pools has joined
+  # token0/token1 on — a V4 Swap log carries only the poolId.
+  - name: map_stock_events
+    kind: map
+    initialBlock: 9070
+    inputs:
+      - map: map_enriched
     output:
       type: proto:uniswap.v4.v1.Events
 
@@ -113,7 +138,7 @@ modules:
     kind: store
     updatePolicy: set
     valueType: string
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_events
 
@@ -143,7 +168,7 @@ modules:
     kind: store
     updatePolicy: add
     valueType: bigint
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_events
 
@@ -153,7 +178,7 @@ modules:
     kind: store
     updatePolicy: add
     valueType: bigint
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_enriched
 
@@ -175,13 +200,13 @@ modules:
     kind: store
     updatePolicy: set
     valueType: string
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_enriched
 
   - name: map_totals
     kind: map
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       - map: map_enriched
       - store: store_pool_totals
@@ -217,7 +242,7 @@ modules:
 
   - name: db_out
     kind: map
-    initialBlock: 25350988
+    initialBlock: 9070
     inputs:
       # map_totals, NOT map_enriched. totals() passes the whole block through and
       # appends PoolTotals/HookTotals, so reading map_enriched here would silently

@@ -123,40 +123,90 @@ use crate::pb::uniswap::v4::v1 as pb;
 /// "Native ETH" and `pricing.ts` treats it as `ADDRESS_ZERO`.
 pub const NATIVE_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
-/// `wrappedNativeAddress` — Base WETH.
-pub const WRAPPED_NATIVE: &str = "0x4200000000000000000000000000000000000006";
+/// `wrappedNativeAddress` — WETH on Robinhood Chain (~525k holders).
+pub const WRAPPED_NATIVE: &str = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 
-/// Native-currency decimals, from `nativeTokenDetails` for the `base` network.
+/// Native-currency decimals, from `nativeTokenDetails` for the `robinhood` network.
 /// Used for `address(0)` legs, which have no contract to call.
 pub const NATIVE_DECIMALS: u32 = 18;
 
-/// Circle USDC on Base — the sole entry in `stablecoinAddresses`.
-pub const USDC: &str = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+/// USDG on Robinhood Chain — the sole entry in `stablecoinAddresses`, and the
+/// cash leg of the equity pools this package exists to index.
+///
+/// Named USDC for continuity with the Base port it was forked from; the
+/// constant is the stablecoin slot, not the issuer. **Six decimals**, unlike
+/// the 18 of every RHJ stock token, so the decimal handling below matters.
+pub const USDC: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
-/// ZORA — the only `whitelistTokens` entry that is neither native/wrapped-native
-/// nor a stablecoin, and therefore the only token on Base whose price actually
-/// goes through the pool search in [`find_native_per_token`].
-pub const ZORA: &str = "0x1111111111166b7fe7bd91427724b487980afc69";
+// ZORA is deliberately absent. It was Base's only whitelist entry that was
+// neither native/wrapped-native nor a stablecoin — the one token whose price
+// actually exercised the pool search in `find_native_per_token`. There is no
+// equivalent in the official Robinhood set, so on this chain that search path
+// is reachable only through registry stock tokens.
 
 /// `stablecoinAddresses`.
 pub const STABLECOINS: [&str; 1] = [USDC];
 
-/// `whitelistTokens`, in the subgraph's order.
-pub const WHITELIST_TOKENS: [&str; 4] = [WRAPPED_NATIVE, USDC, NATIVE_ADDRESS, ZORA];
-
-/// `stablecoinWrappedNativePoolId` — the WETH/USDC pool the native price is read
-/// off. A pool *id*, not an address: V4 pools are keccak hashes of the PoolKey.
+/// `whitelistTokens` — the quote legs, WETH / USDG / native.
 ///
-/// Hardcoded in the subgraph and hardcoded here, deliberately. Discovering "the
-/// deepest USD pool" dynamically would make the native price — which every other
-/// price is denominated in — depend on a liquidity ranking that can move, and a
-/// native price that silently switches source is far worse than one that is
-/// wrong in a fixed, auditable way.
-pub const STABLECOIN_NATIVE_POOL_ID: &str =
-    "0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0";
+/// On Base this array also carried ZORA, the one entry that was neither native
+/// nor a stablecoin and therefore the only token whose price actually went
+/// through the pool search in [`find_native_per_token`]. Robinhood Chain has no
+/// equivalent, so taken literally this array would leave that path unreachable
+/// and every equity token unpriced — which would defeat the package.
+///
+/// The equivalent on this chain is the stock registry: those are the tokens
+/// this package exists to price. [`is_whitelisted`] therefore admits the quote
+/// legs *and* any address in the RHJ registry. Kept as separate sources rather
+/// than one 197-entry array so the two roles stay legible — a quote leg anchors
+/// prices, a stock token receives one.
+pub const WHITELIST_TOKENS: [&str; 3] = [WRAPPED_NATIVE, USDC, NATIVE_ADDRESS];
 
-/// `stablecoinIsToken0` — false on Base: the anchor pool is WETH (token0) /
-/// USDC (token1), so the native price is that pool's `token1Price`.
+/// `stablecoinWrappedNativePoolId` — the WETH/USDG pool the native price is
+/// read off. A pool *id*, not an address: V4 pools are keccak hashes of the
+/// PoolKey.
+///
+/// Discovered on chain, not copied and not guessed. There are **134** WETH/USDG
+/// pools on this PoolManager, so "the" anchor is a choice; this is the one that
+/// actually carries the pair. Over the 200k blocks to 52,625,973:
+///
+/// | fee / tickSpacing | swaps |
+/// |---|---|
+/// | **500 / 10 (this one)** | **917** |
+/// | 3000 / 60 | 128 |
+/// | 100 / 1, 2500 / 50, 10000 / 200 | 0 |
+///
+/// Initialized at block 8,793,983 with no hook. Its latest sqrtPriceX96 prices
+/// 1 WETH at 2,400.21 USDG, which is the sanity check that matters: an anchor
+/// that produces an implausible native price would poison every other price in
+/// the package, silently.
+///
+/// Chosen by configuration and pinned, per the Base rationale above — the point
+/// is that it cannot move underneath us, not that it was picked blindly.
+pub const STABLECOIN_NATIVE_POOL_ID: &str =
+    "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593";
+
+/// The anchor pool, or `None` while unanchored.
+///
+/// An empty id would still be a valid map key, so without this the lookup would
+/// quietly miss forever and look like "no pools seen yet" rather than "not
+/// configured". Callers branch on the `Option` and skip the native-USD write.
+pub fn stablecoin_native_pool_id() -> Option<&'static str> {
+    if STABLECOIN_NATIVE_POOL_ID.is_empty() {
+        None
+    } else {
+        Some(STABLECOIN_NATIVE_POOL_ID)
+    }
+}
+
+/// `stablecoinIsToken0` — whether USDG is token0 of the anchor pool.
+///
+/// False, and confirmed rather than inherited: every one of the 134 WETH/USDG
+/// Initialize events on this chain has currency0 = WETH, currency1 = USDG. V4
+/// orders currencies by address and 0x0bd7… < 0x5fc5…, so this is what the
+/// ordering rule predicts — but the prediction was checked against the log
+/// before being relied on, because getting it backwards inverts the native
+/// price rather than failing.
 pub const STABLECOIN_IS_TOKEN0: bool = false;
 
 /// Upper bound on a token's reported `decimals()` before we refuse to price it.
@@ -260,6 +310,7 @@ pub fn is_stablecoin(token: &str) -> bool {
 /// True for a `whitelistTokens` member.
 pub fn is_whitelisted(token: &str) -> bool {
     WHITELIST_TOKENS.iter().any(|t| token.eq_ignore_ascii_case(t))
+        || crate::registry::is_stock(token)
 }
 
 /// `minimumNativeLocked` for `base`: 1 ETH.
@@ -298,7 +349,7 @@ pub fn minimum_native_locked() -> BigDecimal {
 /// It runs over when liquidity is concentrated at the current price and under
 /// when most of the TVL sits in out-of-range positions — so it cannot be
 /// calibrated to TVL at all. Gating at `1` would reject the native/ZORA pool,
-/// which is precisely the pool the subgraph picks for ZORA.
+/// which is precisely the pool the subgraph picks for ALT_TOKEN.
 ///
 /// 0.05 native (~$120 at the anchor price) is chosen as a **dust filter**, which
 /// is the failure this gate has to catch: a pool with zero active liquidity
@@ -752,7 +803,7 @@ fn price_writes(events: &pb::Events) -> Vec<(u64, String, String)> {
 
     // ---- pass 1: the native price, off the one hardcoded anchor pool --------
     let mut native_usd: Option<BigDecimal> = None;
-    if let Some(anchor) = obs.get(STABLECOIN_NATIVE_POOL_ID) {
+    if let Some(anchor) = stablecoin_native_pool_id().and_then(|id| obs.get(id)) {
         let (price0, price1) = sqrt_price_x96_to_token_prices(&anchor.sqrt, anchor.dec0, anchor.dec1);
         // getNativePriceInUSD: stablecoinIsToken0 ? token0Price : token1Price.
         let price = if STABLECOIN_IS_TOKEN0 { price0 } else { price1 };
@@ -850,7 +901,12 @@ fn price_writes(events: &pb::Events) -> Vec<(u64, String, String)> {
         // by-definition and stablecoin branches there is no source pool, so the
         // provenance is the anchor.
         let (source_pool, native_locked, ordinal, block) =
-            attribution(token, &candidates, &origin, obs.get(STABLECOIN_NATIVE_POOL_ID));
+            attribution(
+                token,
+                &candidates,
+                &origin,
+                stablecoin_native_pool_id().and_then(|id| obs.get(id)),
+            );
 
         writes.push((
             ordinal,
@@ -1019,6 +1075,17 @@ pub fn store_prices(events: pb::Events, store: StoreSetString) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A whitelist-shaped token that is neither native, wrapped-native, nor a
+    /// stablecoin — the only kind whose price actually exercises the pool
+    /// search in [`find_native_per_token`].
+    ///
+    /// On Base that role was ZORA, which does not exist on Robinhood Chain.
+    /// NVDA stands in: on this chain the tokens that reach the search path are
+    /// registry stock tokens, so the fixture is now the real shape of the
+    /// problem rather than a borrowed one. Address verified against the live
+    /// RHJ registry and eth_getCode on chain 4663.
+    const ALT_TOKEN: &str = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
     use super::*;
 
     fn bd(s: &str) -> BigDecimal {
@@ -1173,10 +1240,10 @@ mod tests {
     fn absurd_decimals_are_rejected_before_building_a_power_of_ten() {
         // decimals() is attacker-controlled. 10^4294967295 would OOM the module
         // and take the stream down with it.
-        assert_eq!(effective_decimals(ZORA, u32::MAX, true), None);
-        assert_eq!(effective_decimals(ZORA, MAX_SANE_DECIMALS + 1, true), None);
+        assert_eq!(effective_decimals(ALT_TOKEN, u32::MAX, true), None);
+        assert_eq!(effective_decimals(ALT_TOKEN, MAX_SANE_DECIMALS + 1, true), None);
         assert_eq!(
-            effective_decimals(ZORA, MAX_SANE_DECIMALS, true),
+            effective_decimals(ALT_TOKEN, MAX_SANE_DECIMALS, true),
             Some(MAX_SANE_DECIMALS)
         );
     }
@@ -1263,7 +1330,7 @@ mod tests {
             pool_id: "0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a"
                 .to_string(),
             token0: NATIVE_ADDRESS.to_string(),
-            token1: ZORA.to_string(),
+            token1: ALT_TOKEN.to_string(),
             price0: bd("0.000002760022414164888548236587471837841"),
             price1: bd("362315.898185404467351247177309118"),
             amount0: bd("13.31826892329505033"),
@@ -1277,12 +1344,12 @@ mod tests {
     fn zora_matches_deployed_subgraph() {
         // ZORA is the only Base whitelist token that actually goes through the
         // pool search. The deployed subgraph reports
-        //   ZORA.derivedETH = 0.000002760022414164888548236587471837841
+        //   ALT_TOKEN.derivedETH = 0.000002760022414164888548236587471837841
         // and this pool's token0Price is that number, which confirms the
         // subgraph selected this pool and that "token0 per token1" is the right
         // side of the pair to read.
         let got = find_native_per_token(
-            ZORA,
+            ALT_TOKEN,
             None,
             &[zora_candidate_from_subgraph()],
             &minimum_native_locked(),
@@ -1291,7 +1358,7 @@ mod tests {
         assert_price_eq(
             &got,
             &bd("0.000002760022414164888548236587471837841"),
-            "ZORA.derivedETH",
+            "ALT_TOKEN.derivedETH",
         );
     }
 
@@ -1306,7 +1373,7 @@ mod tests {
         deeper.amount0 = bd("999");
 
         let got = find_native_per_token(
-            ZORA,
+            ALT_TOKEN,
             None,
             &[deep.clone(), deeper],
             &minimum_native_locked(),
@@ -1319,7 +1386,7 @@ mod tests {
         dust.price0 = bd("0.5");
         dust.amount0 = bd("0.0001");
         assert_eq!(
-            find_native_per_token(ZORA, None, &[dust], &minimum_native_locked()),
+            find_native_per_token(ALT_TOKEN, None, &[dust], &minimum_native_locked()),
             None
         );
     }
@@ -1334,7 +1401,7 @@ mod tests {
             pool_id: "0x2d3627dc27b755069a5612444f30ccf7cc7897bab68c5396b1713f6ee1b6d526"
                 .to_string(),
             token0: "0x0e9fa3a35625c7b8aaca93bdc635227d117f5ad8".to_string(), // USWR
-            token1: ZORA.to_string(),
+            token1: ALT_TOKEN.to_string(),
             price0: bd("113.8075115387424191517720351620583"),
             price1: bd("0.008786766237829384569447992350572425"),
             amount0: bd("903162039.85973230733708887"),
@@ -1343,7 +1410,7 @@ mod tests {
             derived_native1: None,
         };
         assert_eq!(
-            find_native_per_token(ZORA, None, &[c], &minimum_native_locked()),
+            find_native_per_token(ALT_TOKEN, None, &[c], &minimum_native_locked()),
             None
         );
     }
@@ -1478,7 +1545,7 @@ mod tests {
                 swap(
                     "0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a",
                     NATIVE_ADDRESS,
-                    ZORA,
+                    ALT_TOKEN,
                     18,
                     18,
                     true,
@@ -1515,9 +1582,9 @@ mod tests {
 
         // ZORA: the pool search, equal to the deployed subgraph's derivedETH.
         assert_price_eq(
-            &w[&derived_native_key(ZORA)].price,
+            &w[&derived_native_key(ALT_TOKEN)].price,
             &bd("0.000002760022414164888548236587471837841"),
-            "ZORA.derivedETH",
+            "ALT_TOKEN.derivedETH",
         );
 
         // WETH and native ETH are 1 by definition and are deliberately NOT
@@ -1532,7 +1599,7 @@ mod tests {
     #[test]
     fn zora_attribution_names_the_winning_pool() {
         let w = writes_map(&realistic_block());
-        let zora = &w[&derived_native_key(ZORA)];
+        let zora = &w[&derived_native_key(ALT_TOKEN)];
         assert_eq!(
             zora.source_pool,
             "0xd694bd7285eeeee19d3d5da38f613859168c422d628def88a0c95dad12071f3a"
@@ -1613,7 +1680,7 @@ mod tests {
         assert!(!w.contains_key(NATIVE_USD_KEY));
         assert!(!w.contains_key(&derived_native_key(USDC)));
         // ZORA is unaffected: its pool is native/ZORA and prices itself.
-        assert!(w.contains_key(&derived_native_key(ZORA)));
+        assert!(w.contains_key(&derived_native_key(ALT_TOKEN)));
     }
 
     #[test]
@@ -1626,7 +1693,7 @@ mod tests {
         let w = writes_map(&events);
         assert!(!w.contains_key(NATIVE_USD_KEY));
         assert!(!w.contains_key(&derived_native_key(USDC)));
-        assert!(w.contains_key(&derived_native_key(ZORA)));
+        assert!(w.contains_key(&derived_native_key(ALT_TOKEN)));
     }
 
     #[test]
@@ -1650,10 +1717,14 @@ mod tests {
     }
 
     #[test]
-    fn config_matches_the_subgraph_base_branch() {
+    fn config_matches_the_robinhood_chain_branch() {
         // Byte-for-byte against chains.ts BASE_NETWORK_NAME. These are compared
         // to lowercase row values, so a checksummed constant would never match
         // and every token would quietly go unpriced.
+        // Registry stock tokens are whitelisted too — that is the arm that
+        // replaces Base's ZORA and the reason equity swaps get a price at all.
+        assert!(is_whitelisted(ALT_TOKEN), "a registry stock token must be priceable");
+        assert!(!is_whitelisted("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
         for a in WHITELIST_TOKENS.iter().chain(STABLECOINS.iter()) {
             assert_eq!(*a, a.to_ascii_lowercase(), "{} must be lowercase", a);
         }
@@ -1661,13 +1732,17 @@ mod tests {
         assert!(is_whitelisted(WRAPPED_NATIVE));
         assert!(is_whitelisted(NATIVE_ADDRESS));
         assert!(is_whitelisted(USDC));
-        assert!(is_whitelisted(ZORA));
+        assert!(is_whitelisted(ALT_TOKEN));
         assert!(is_stablecoin(USDC));
         assert!(!is_stablecoin(WRAPPED_NATIVE));
         // Case-insensitive matching, because a checksummed address arriving on a
-        // row must still be recognised.
-        assert!(is_native_or_wrapped("0x4200000000000000000000000000000000000006"));
-        assert!(is_whitelisted(&ZORA.to_ascii_uppercase().replace("0X", "0x")));
+        // row must still be recognised. This was Base's WETH (0x4200…0006);
+        // on this chain that address is just another contract, and asserting it
+        // here would have been asserting the wrong chain's config.
+        assert!(is_native_or_wrapped("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"));
+        assert!(!is_native_or_wrapped("0x4200000000000000000000000000000000000006"),
+            "Base WETH must not be treated as wrapped-native on Robinhood");
+        assert!(is_whitelisted(&ALT_TOKEN.to_ascii_uppercase().replace("0X", "0x")));
     }
 
     #[test]

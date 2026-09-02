@@ -1,4 +1,4 @@
-//! PoolManager (0x4985…2b2b) event extraction — the core of the port.
+//! PoolManager (0x8366…0951) event extraction — the core of the port.
 //!
 //! Scope note: this module is a pure decoder. Every row it emits is derivable
 //! from the log itself, so unlike the subgraph it never needs a prior `Pool`
@@ -31,7 +31,10 @@ use crate::pb::uniswap::v4::v1 as pb;
 /// Base mainnet PoolManager. Kept as a byte array so the hot-loop filter is a
 /// 20-byte memcmp rather than a hex-string comparison — this loop sees every
 /// log on Base.
-const POOL_MANAGER: [u8; 20] = hex!("498581ff718922c3f8e6a244956af099b2652b2b");
+/// Uniswap V4 PoolManager on Robinhood Chain (eip155:4663), deployed at block
+/// 9070. Base's was 0x4985…2b2b; only the address filter changes here, the
+/// v4-core ABI and every decode arm below are identical.
+const POOL_MANAGER: [u8; 20] = hex!("8366a39cc670b4001a1121b8f6a443a643e40951");
 
 /// Decode every PoolManager log in the block into `events`.
 ///

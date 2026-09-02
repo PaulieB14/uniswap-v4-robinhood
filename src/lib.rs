@@ -35,6 +35,9 @@
 //! consumer that only wants raw decoded logs pays nothing for the join, and
 //! re-running the enrichment does not re-decode the chain.
 
+pub mod registry;
+pub mod stock_filter;
+pub mod registry_data;
 mod abi;
 mod arrakis;
 mod db_out;
@@ -77,8 +80,19 @@ pub fn map_events(blk: Block) -> Result<proto::Events, Error> {
     let mut events = proto::Events::default();
 
     pool_manager::extract(&blk, &mut events);
-    position_manager::extract(&blk, &mut events);
-    arrakis::extract(&blk, &mut events);
+    // PositionManager and the Arrakis hook factory are NOT wired on Robinhood.
+    //
+    // Both constants in those modules are Base deployments. Calling them here
+    // would be wrong in one of two ways: a no-op if nothing sits at those
+    // addresses on this chain, or — worse, and silently — decoding whatever
+    // unrelated contract happens to occupy them, since addresses are not
+    // reserved across chains. Uniswap has not published a PositionManager for
+    // Robinhood Chain; when it does, wire it exactly as Base does.
+    //
+    // The modules stay in the tree, compiled and tested, so re-enabling is a
+    // one-line change rather than a port.
+    let _ = &position_manager::extract;
+    let _ = &arrakis::extract;
 
     Ok(events)
 }

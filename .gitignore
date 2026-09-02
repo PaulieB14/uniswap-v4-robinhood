@@ -1,2 +1,4 @@
 /target
 *.spkg
+target/
+*.spkg
