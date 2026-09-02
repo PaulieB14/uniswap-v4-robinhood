@@ -439,10 +439,12 @@ fn push_hook_stats(changes: &mut DatabaseChanges, hs: &pb::HookStats, idx: usize
 // ---------------------------------------------------------------------------
 // previously-unhomed PoolManager events
 //
-// All three writers are complete but currently unreachable: pool_manager.rs
-// does not decode Donate / ERC-6909 / ProtocolFee logs yet, so the repeated
-// fields arrive empty. Do not read an empty `donate` table as "V4 has no
-// donations on Base".
+// STALE COMMENT CORRECTED: pool_manager.rs does decode all three (Donate at
+// the Donate arm, ERC-6909 at the claim-token arms, ProtocolFee at its own), so
+// these writers ARE reachable. What is genuinely rare is the events themselves
+// — Donate ran at roughly 4 per 10,000 blocks in the sampled range — so an
+// empty `donate` table means the chain was quiet, not that the decoder is
+// missing.
 // ---------------------------------------------------------------------------
 
 fn push_donate(changes: &mut DatabaseChanges, d: &pb::Donate, idx: usize) {

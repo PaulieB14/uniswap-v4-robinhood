@@ -224,6 +224,36 @@ where
         }
     }
 
+    // Donate carries only the poolId too, and the proto has promised since the
+    // fields were added that map_enriched fills these from store_pools. It did
+    // not: the loop was never written, so token0/token1 were permanently empty
+    // and a consumer reading the documented "empty means pool not in the store"
+    // would conclude the store missed every donation on the chain.
+    //
+    // No symbol/decimals pass here, unlike the three above: Donate has no fields
+    // for them (the message stops at amounts_adjusted), so there is nothing to
+    // attach.
+    for d in out.donates.iter_mut() {
+        // Resolve through the accumulator when the pool is already there, and
+        // fall back to the store otherwise. Donates are NOT folded into `pools`
+        // in pass 1 on purpose: that map drives pool_stats, and a donate-only
+        // pool would then appear as a stats row with zero swaps and zero
+        // modifies — a new and different claim about block activity. Joining
+        // identity is additive; inventing an aggregate row is not.
+        let resolved;
+        let p = match pools.get(&d.pool_id).and_then(|a| a.pool.as_ref()) {
+            Some(p) => Some(p),
+            None => {
+                resolved = resolve(&d.pool_id);
+                resolved.as_ref()
+            }
+        };
+        if let Some(p) = p {
+            d.token0 = p.token0.clone();
+            d.token1 = p.token1.clone();
+        }
+    }
+
     // ---- pass 3: roll pools up into hooks
     let mut hooks: BTreeMap<String, HookAcc> = BTreeMap::new();
     let mut unresolved_pools = 0u64;
@@ -738,6 +768,61 @@ mod tests {
         assert_eq!(out.hook_stats[0].pool_count, 1);
         assert_eq!(out.hook_stats[0].swap_count, 0);
         assert_eq!(out.hook_stats[0].distinct_fee_values, 0);
+    }
+
+    #[test]
+    fn donates_get_their_token_pair_joined() {
+        // The proto has always documented token0/token1 on Donate as "filled by
+        // map_enriched from store_pools; empty means pool not in the store", but
+        // the loop that fills them did not exist — so every donation looked like
+        // a store miss, and any downstream filter keyed on the pair dropped all
+        // of them.
+        let out = enrich(
+            pb::Events {
+                donates: vec![pb::Donate {
+                    id: "d1".to_string(),
+                    pool_id: POOL_A.to_string(),
+                    amount0: "10".to_string(),
+                    amount1: "20".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            resolver(vec![pool(POOL_A, "0xt0", "0xt1", 3000, HOOK_1)]),
+            |_| None,
+        );
+        assert_eq!(out.donates.len(), 1);
+        assert_eq!(out.donates[0].token0, "0xt0");
+        assert_eq!(out.donates[0].token1, "0xt1");
+        // Raw amounts untouched by the join.
+        assert_eq!(out.donates[0].amount0, "10");
+        // And no phantom aggregate: a donate-only pool must not acquire a
+        // pool_stats row claiming zero swaps and zero modifies, which would be
+        // a new assertion about block activity rather than a join.
+        assert!(
+            out.pool_stats.is_empty(),
+            "a donation alone is not pool activity for stats purposes"
+        );
+    }
+
+    #[test]
+    fn a_donate_for_an_unknown_pool_keeps_an_empty_pair() {
+        // The documented meaning of empty. Inventing a zero address here would
+        // be indistinguishable from a real native-ETH pool, exactly as on Swap.
+        let out = enrich(
+            pb::Events {
+                donates: vec![pb::Donate {
+                    id: "d1".to_string(),
+                    pool_id: "0xnot-in-the-store".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            resolver(vec![]),
+            |_| None,
+        );
+        assert!(out.donates[0].token0.is_empty());
+        assert!(out.donates[0].token1.is_empty());
     }
 
     #[test]

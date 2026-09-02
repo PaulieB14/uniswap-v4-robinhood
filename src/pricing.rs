@@ -1038,6 +1038,21 @@ fn attribution(
     origin: &BTreeMap<String, (u64, u64)>,
     anchor: Option<&Observation>,
 ) -> (String, BigDecimal, u64, u64) {
+    // Mirror find_native_per_token's branch order EXACTLY. Its first two
+    // branches return a price that no candidate pool produced — 1 by definition
+    // for native/wrapped, and 1/native_usd off the anchor for a stablecoin — so
+    // running the pool search for those tokens attributes the price to a pool
+    // that had nothing to do with it.
+    //
+    // USDG is the case that bit: it appears in thousands of pools, and the
+    // native/USDG 500/10 pool is roughly twice the anchor's depth, so whenever
+    // both traded in one block the search named that pool as the source of a
+    // number computed entirely from the anchor. The price was right and its
+    // provenance was wrong, which is the harder kind of wrong to notice.
+    if is_native_or_wrapped(token) || is_stablecoin(token) {
+        return anchor_attribution(anchor);
+    }
+
     let mut largest = BigDecimal::zero();
     let mut best: Option<&PoolPriceCandidate> = None;
 
@@ -1066,8 +1081,13 @@ fn attribution(
         return (c.pool_id.clone(), largest, ordinal, block);
     }
 
-    // By-definition (native/WETH) and stablecoin prices have no source pool of
-    // their own; they are the anchor pool's numbers restated.
+    // A priced token whose every candidate fell below the depth gate.
+    anchor_attribution(anchor)
+}
+
+/// By-definition (native/WETH) and stablecoin prices have no source pool of
+/// their own; they are the anchor pool's numbers restated.
+fn anchor_attribution(anchor: Option<&Observation>) -> (String, BigDecimal, u64, u64) {
     match anchor {
         Some(a) => (a.pool_id.clone(), native_side_depth(a), a.ordinal, a.block),
         None => (String::new(), BigDecimal::zero(), 0, 0),
@@ -1644,6 +1664,51 @@ mod tests {
         // unpriced; that is the one thing this store expects of its readers.
         assert!(!w.contains_key(&derived_native_key(WRAPPED_NATIVE)));
         assert!(!w.contains_key(&derived_native_key(NATIVE_ADDRESS)));
+    }
+
+    #[test]
+    fn a_stablecoin_price_is_attributed_to_the_anchor_not_the_deepest_pool() {
+        // USDG's price is 1/native_usd, computed entirely from the anchor —
+        // find_native_per_token's stablecoin branch never looks at a pool. But
+        // USDG sits in thousands of pools, and the native/USDG 500/10 pool on
+        // this chain is ~2.1x the anchor's depth (229.45 vs 107.49 native).
+        // Before this was fixed, whenever both traded in one block the
+        // attribution search named that deeper pool as the source of a number it
+        // did not produce: a correct price with false provenance.
+        let anchor = Observation {
+            pool_id: STABLECOIN_NATIVE_POOL_ID.to_string(),
+            token0: WRAPPED_NATIVE.to_string(),
+            token1: USDC.to_string(),
+            dec0: 18,
+            dec1: 6,
+            sqrt: BigInt::from(1u64),
+            liquidity: BigInt::from(1u64),
+            ordinal: 7,
+            block: 52_681_276,
+        };
+        // A deeper pool that also contains USDG, and would otherwise win.
+        let deeper = PoolPriceCandidate {
+            pool_id: "0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982"
+                .to_string(),
+            token0: NATIVE_ADDRESS.to_string(),
+            token1: USDC.to_string(),
+            price0: bd("0.000419"),
+            price1: bd("2386.65"),
+            amount0: bd("229.452"),
+            amount1: bd("547620.31"),
+            derived_native0: Some(BigDecimal::one()),
+            derived_native1: Some(bd("0.000419")),
+        };
+        let mut origin = BTreeMap::new();
+        origin.insert(deeper.pool_id.clone(), (9u64, 52_681_276u64));
+
+        let (source_pool, _, ordinal, _) =
+            attribution(USDC, &[deeper], &origin, Some(&anchor));
+        assert_eq!(
+            source_pool, STABLECOIN_NATIVE_POOL_ID,
+            "a stablecoin's provenance is the anchor, whatever else is deeper"
+        );
+        assert_eq!(ordinal, 7, "and the anchor's ordinal, not the other pool's");
     }
 
     #[test]

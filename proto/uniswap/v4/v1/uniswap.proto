@@ -387,7 +387,12 @@ message Donate {
   //
   //     amountN_adjusted = +amountN / 10^decimals(tokenN)
   //
-  // Written only when both legs' decimals were RPC-measured, exactly as on Swap.
+  // NOT CURRENTLY WRITTEN. attach_usd() adjusts swaps only, and Donate carries
+  // no decimals fields of its own for it to read, so these three stay at their
+  // proto3 defaults on every row. `amounts_adjusted` is therefore always false,
+  // which at least reads correctly — but do not wait for a true. Use amount0 /
+  // amount1 with decimals looked up from `token0` / `token1`, which map_enriched
+  // does fill.
   string amount0_adjusted = 9;
   string amount1_adjusted = 10;
   bool   amounts_adjusted = 11;
