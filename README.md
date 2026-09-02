@@ -43,7 +43,7 @@ carrying that pricing through and attaching UI share counts.
 ## Running it
 
 ```bash
-substreams run ./uniswap-v4-robinhood-v0.1.1.spkg map_stock_events \
+substreams run ./uniswap-v4-robinhood-v0.1.2.spkg map_stock_events \
   -e robinhood -s 9070 -t +50000 -o jsonl
 ```
 
@@ -78,30 +78,55 @@ those addresses.
 ## USD pricing
 
 **Anchored.** `STABLECOIN_NATIVE_POOL_ID` is
-`0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593` — the
-WETH/USDG pool at fee 500 / tickSpacing 10 / no hook, initialized at block
-8,793,983.
+`0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982` — the
+**native/USDG** pool at fee 500 / tickSpacing 10 / no hook, initialised at block
+**169,464**.
 
-That pool was not guessed — but the comparison set was narrower than it should
-have been, and the README used to state the result as if it were global. It is
-the busiest of the **134 WETH/USDG** pools on this PoolManager: over the 200k
-blocks to 52,625,973 it took **917 swaps** against 128 for the next busiest and
-zero for the rest. Its latest `sqrtPriceX96` prices 1 WETH at **2,400.21 USDG**,
-which is the check that matters — a bad anchor poisons every other price in the
-package, silently.
+v0.1.0 and v0.1.1 anchored elsewhere, and the change is the whole of v0.1.2.
+They used the busiest of the 134 **WETH**/USDG pools (`0xfcfae8fa…`, 917 swaps
+over the 200k blocks to 52,625,973 against 128 for the next busiest). That
+ranking was right within its set — but the set was wrong. The 344 native/USDG
+pools were never considered, and they anchor just as well. Re-measured, this
+pool wins on every axis:
 
-**It is not the best anchor on the chain.** The 344 native/USDG pools were never
-ranked, and one of them —
-`0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982` — is 2.14x
-deeper, busier, and initialised 8.62M blocks earlier, quoting within 0.018% of
-the chosen pool. See the `STABLECOIN_NATIVE_POOL_ID` doc comment for the full
-comparison, what the late first swap does and does not cost (early stock/USDG
-swaps are still priced — verified by streaming the pre-anchor era), and why the
-switch is left for a deliberate, stream-tested change.
+| | old WETH/USDG anchor | this native/USDG anchor |
+|---|---|---|
+| virtual reserves | 107.2 native / 256,714 USDG | 229.1 / 548,476 — **2.14×** |
+| swaps, last 300k blocks | 1,854 | 2,223 |
+| initialised at block | 8,793,983 | **169,464** |
+| first swap at block | 8,794,427 | **178,761** |
 
-`STABLECOIN_IS_TOKEN0` is `false`: all 134 WETH/USDG pools have
-`currency0 = WETH`. It would stay `false` for the native/USDG candidate too,
-since `0x000…` sorts below `0x5fc5…`.
+Read at the same block (52,726,799) through `extsload` on each pool's slot0, the
+two quote **2,388.800835** and **2,389.672064** USDG — 0.0365% apart. Same asset,
+same price: the switch buys depth and history without moving the USD basis.
+
+**The history is the point.** `native_usd` is written only when the anchor
+trades, so under the old anchor `native_price_usd` was empty and no
+`derived_native` was stored for any token across the first 16.7% of chain
+history. Verified by streaming: at the new anchor's first swap (block 178,761)
+the module emits `native_price_usd = 1479.229165…`, which matches the price
+computed independently from that swap's own `sqrtPriceX96` to every digit.
+
+One claim worth correcting, so the switch is not credited with fixing something
+that was never broken: an audit reported that the old anchor left "every row
+with `priced=false` and an empty `amount_usd`" before block 8,794,427. It did
+not. `usd_for_leg` returns the human amount directly for a stablecoin leg — no
+store read, no anchor — so a stock/USDG swap prices from its USDG side alone.
+Streaming blocks 1,570,000–1,579,499 (7.2M blocks before the old anchor's first
+swap) returned both equity swaps `priced=true`, AMD/USDG at 15.602182 and
+NVDA/USDG at 26.422699. What that era actually lost was `native_price_usd`, the
+derived ratios, and any pool quoted in native or WETH rather than the stablecoin.
+
+`STABLECOIN_IS_TOKEN0` is `false`: the anchor's `Initialize` has
+`currency0 = address(0)` and `currency1 = USDG`. It was also false for the old
+WETH/USDG anchor, so the flag survives the move unchanged — a coincidence worth
+asserting rather than assuming, and
+`the_anchor_is_pinned_to_literals_verified_on_chain` does assert it.
+
+No code change was needed to move: `effective_decimals` short-circuits on
+`is_native` before the `measured` gate, `native_token()` carries
+`decimals_measured: true`, and `native_side_depth` already reads a native
+`token0`.
 
 **Filter on the `priced` flags, never on `amount_usd > 0`.** A genuine zero-value
 swap and an unpriced leg are different things.

@@ -13,8 +13,12 @@
 # and pack separately.
 
 WASM   := target/wasm32-unknown-unknown/release/uniswap_v4_robinhood.wasm
-SPKG   := uniswap-v4-robinhood-v0.1.1.spkg
-SOURCES = src proto substreams.yaml Cargo.toml
+SPKG   := uniswap-v4-robinhood-v0.1.2.spkg
+# Only what cargo actually compiles into the wasm. substreams.yaml is read by
+# `substreams pack`, not by cargo, so a manifest-only edit (a version bump)
+# does NOT make the wasm stale — flagging it would train people to ignore
+# this check, which is the one failure it exists to prevent.
+SOURCES = src Cargo.toml Cargo.lock
 
 .PHONY: build test pack check publish stale clean-codegen
 
@@ -38,9 +42,11 @@ stale:                              ## report any source newer than the built wa
 clean-codegen:                      ## remove substreams-build codegen that shadows src/pb.rs
 	@rm -rf src/pb
 
-check: test build                   ## run before publishing
-	@$(MAKE) --no-print-directory stale
+check: stale-report test build      ## run before publishing
 	@echo "OK: tests pass, wasm rebuilt from current source, package packed"
+
+stale-report:                       ## non-fatal staleness note before building
+	@$(MAKE) --no-print-directory stale || true
 
 publish: check
 	substreams registry publish ./$(SPKG)

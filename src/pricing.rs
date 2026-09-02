@@ -169,75 +169,66 @@ pub const STABLECOINS: [&str; 1] = [USDC];
 /// prices, a stock token receives one.
 pub const WHITELIST_TOKENS: [&str; 3] = [WRAPPED_NATIVE, USDC, NATIVE_ADDRESS];
 
-/// `stablecoinWrappedNativePoolId` — the WETH/USDG pool the native price is
+/// `stablecoinWrappedNativePoolId` — the native/USDG pool the native price is
 /// read off. A pool *id*, not an address: V4 pools are keccak hashes of the
 /// PoolKey.
 ///
-/// Discovered on chain, not copied and not guessed. There are **134** WETH/USDG
-/// pools on this PoolManager, so "the" anchor is a choice; this is the one that
-/// actually carries the pair. Over the 200k blocks to 52,625,973:
+/// Discovered on chain, not copied and not guessed, and re-ranked in v0.1.2
+/// over BOTH candidate families rather than just one.
 ///
-/// | fee / tickSpacing | swaps |
-/// |---|---|
-/// | **500 / 10 (this one)** | **917** |
-/// | 3000 / 60 | 128 |
-/// | 100 / 1, 2500 / 50, 10000 / 200 | 0 |
+/// v0.1.0 and v0.1.1 anchored on the busiest of the 134 WETH/USDG pools
+/// (0xfcfae8fa…, 917 swaps over the 200k blocks to 52,625,973 against 128 for
+/// the next busiest). That ranking was correct within its set, but the set was
+/// wrong: the 344 native/USDG pools were never considered, and they anchor just
+/// as well under this code. Re-measured on chain 4663, this pool wins on every
+/// axis:
 ///
-/// Initialized at block 8,793,983 with no hook. Its latest sqrtPriceX96 prices
-/// 1 WETH at 2,400.21 USDG, which is the sanity check that matters: an anchor
-/// that produces an implausible native price would poison every other price in
-/// the package, silently.
-///
-/// Chosen by configuration and pinned, per the Base rationale above — the point
-/// is that it cannot move underneath us, not that it was picked blindly.
-/// A DEEPER, OLDER ALTERNATIVE EXISTS AND WAS NOT TAKEN.
-///
-/// This anchor was chosen among WETH/USDG pools only; the 344 native/USDG pools
-/// were never in the comparison set, and are equally valid anchors under this
-/// code. The best of them,
-/// 0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982
-/// (native/USDG, fee 500, tickSpacing 10, no hook), beats this one on every
-/// axis measured over chain 4663:
-///
-/// | | this anchor | native/USDG candidate |
+/// | | old WETH/USDG anchor | this native/USDG anchor |
 /// |---|---|---|
 /// | virtual reserves | 107.2 native / 256,714 USDG | 229.1 / 548,476 — **2.14x** |
 /// | swaps, last 300k blocks | 1,854 | 2,223 |
-/// | initialised at block | 8,793,983 | 169,464 — **8.62M earlier** |
-/// | FIRST SWAP at block | 8,794,427 | 178,761 |
+/// | initialised at block | 8,793,983 | **169,464** |
+/// | first swap at block | 8,794,427 | **178,761** |
 ///
-/// They quote 2,393.69 and 2,394.12 USDG per native at the same block (0.018%
-/// apart), so this is a depth-and-history choice, not a correctness one.
+/// Read at the same block (52,726,799) via `extsload` on each pool's slot0, the
+/// two quote 2,388.800835 and 2,389.672064 USDG — **0.0365% apart**. They are
+/// the same asset at the same price, so the switch buys depth and history
+/// without moving the USD basis.
 ///
-/// # What the late first swap does and does NOT cost
+/// # Why the history mattered
 ///
-/// `native_usd` is written only when the anchor trades, so with this anchor it
-/// is never written before block 8,794,427 — 16.7% of chain history in which
-/// `native_price_usd` is empty and no `derived_native` is stored for any token.
+/// `native_usd` is written only when the anchor trades. The old anchor's first
+/// swap was at block 8,794,427, so `native_price_usd` was empty and no
+/// `derived_native` was stored for ANY token across the first 16.7% of chain
+/// history. This anchor's first swap is at 178,761, which recovers essentially
+/// all of it.
 ///
-/// It does NOT follow that early equity swaps are unpriced, and an audit that
-/// claimed so was wrong. [`usd_for_leg`] returns the human amount directly for
-/// a stablecoin leg, with no store read and no anchor, so a STOCK/USDG swap is
-/// priced from its USDG side alone. Verified by streaming this package over
-/// blocks 1,570,000-1,579,499 — 7.2M blocks before the anchor's first swap:
-/// both equity swaps in the window (AMD/USDG, NVDA/USDG) came out `priced=true`
-/// with amount_usd 15.602182 and 26.422699, and `native_price_usd` empty.
+/// An audit claimed the old anchor left "every row with priced=false and an
+/// empty amount_usd" over that span. That was wrong, and worth recording so the
+/// switch is not credited with fixing something that was never broken:
+/// [`usd_for_leg`] returns the human amount directly for a stablecoin leg, with
+/// no store read and no anchor, so a STOCK/USDG swap prices from its USDG side
+/// alone. Verified by streaming the package over blocks 1,570,000-1,579,499 —
+/// 7.2M blocks before the old anchor's first swap — where both equity swaps in
+/// the window (AMD/USDG, NVDA/USDG) came out `priced=true` with amount_usd
+/// 15.602182 and 26.422699 and `native_price_usd` empty. What that era really
+/// lost was `native_price_usd` itself, the derived ratios, and any pool quoted
+/// in native or WETH rather than the stablecoin.
 ///
-/// What the early era genuinely loses is any pool whose quote leg is native or
-/// WETH rather than the stablecoin: both legs then need `native_usd` and both
-/// return None. Sampling pre-anchor windows found exactly one such equity pool
-/// (META/native, initialised 7,505,182) and it had no swaps — the early equity
-/// market was USDG-quoted, which is why the era prices as well as it does.
+/// # No code change was needed to move here
 ///
-/// Switching is still worth doing — it would restore `native_price_usd` and the
-/// derived ratios across 8.6M more blocks and add 2.14x depth — and the audit
-/// verified it needs no code change: `STABLECOIN_IS_TOKEN0` stays false
-/// (0x000… < 0x5fc5…), `effective_decimals` already substitutes NATIVE_DECIMALS
-/// for address(0), and `native_side_depth` already handles a native token0. It
-/// is left for a deliberate, stream-tested change rather than done here,
-/// because the anchor sets the USD basis for every figure the package emits.
+/// A native `token0` is already handled throughout: [`effective_decimals`]
+/// short-circuits on `is_native` BEFORE the `measured` gate (so address(0)
+/// yields 18 without an RPC probe), `tokens::native_token()` carries
+/// `decimals_measured: true` so `attach_tokens`'s AND still passes,
+/// `native_side_depth` reads the native side when it is token0, and
+/// [`STABLECOIN_IS_TOKEN0`] stays false because 0x000… sorts below 0x5fc5….
+/// All four are asserted by `the_anchor_is_pinned_to_literals_verified_on_chain`.
+///
+/// Chosen by configuration and pinned, per the Base rationale above — the point
+/// is that it cannot move underneath us, not that it was picked blindly.
 pub const STABLECOIN_NATIVE_POOL_ID: &str =
-    "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593";
+    "0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982";
 
 /// The anchor pool, or `None` while unanchored.
 ///
@@ -254,12 +245,12 @@ pub fn stablecoin_native_pool_id() -> Option<&'static str> {
 
 /// `stablecoinIsToken0` — whether USDG is token0 of the anchor pool.
 ///
-/// False, and confirmed rather than inherited: every one of the 134 WETH/USDG
-/// Initialize events on this chain has currency0 = WETH, currency1 = USDG. V4
-/// orders currencies by address and 0x0bd7… < 0x5fc5…, so this is what the
-/// ordering rule predicts — but the prediction was checked against the log
-/// before being relied on, because getting it backwards inverts the native
-/// price rather than failing.
+/// False, and confirmed rather than inherited: the anchor's Initialize log has
+/// currency0 = address(0) (native) and currency1 = USDG, so the native price is
+/// token1Price. It was also false for the old WETH/USDG anchor — every one of
+/// those 134 pools has currency0 = WETH — so the flag survives the v0.1.2
+/// anchor move unchanged, which is exactly the kind of coincidence worth
+/// asserting rather than assuming.
 pub const STABLECOIN_IS_TOKEN0: bool = false;
 
 /// Upper bound on a token's reported `decimals()` before we refuse to price it.
@@ -1865,32 +1856,39 @@ mod tests {
         // Every other test that touches the anchor reads STABLECOIN_NATIVE_POOL_ID
         // itself, so editing the constant leaves them all green while silently
         // repricing the entire package. This test is the one place the anchor's
-        // identity is written down independently.
+        // identity is written down independently. It fired, as intended, when the
+        // anchor moved from the WETH/USDG pool to this one.
         //
         // Verified by RPC on chain 4663 (eth_chainId 0x1237). The pool's
-        // Initialize log, at block 8,793,983:
-        //   topic1 (id)      0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593
-        //   topic2 (curr0)   0x…0bd7d308f8e1639fab988df18a8011f41eacad73   WETH, decimals()=18
-        //   topic3 (curr1)   0x…5fc5360d0400a0fd4f2af552add042d716f1d168   USDG, decimals()=6
+        // Initialize log, at block 169,464:
+        //   topic1 (id)      0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982
+        //   topic2 (curr0)   0x…0000000000000000000000000000000000000000   NATIVE, 18 decimals
+        //   topic3 (curr1)   0x…5fc5360d0400a0fd4f2af552add042d716f1d168   USDG,    decimals()=6
         //   data             fee=500, tickSpacing=10, hooks=0x0
-        // Of the 134 WETH/USDG Initialize logs on this chain, exactly one has
-        // (fee 500, tickSpacing 10, no hook).
+        // First swap at block 178,761.
         assert_eq!(
             STABLECOIN_NATIVE_POOL_ID,
-            "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593",
+            "0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982",
         );
-        assert_eq!(WRAPPED_NATIVE, "0x0bd7d308f8e1639fab988df18a8011f41eacad73");
+        assert_eq!(NATIVE_ADDRESS, "0x0000000000000000000000000000000000000000");
         assert_eq!(USDC, "0x5fc5360d0400a0fd4f2af552add042d716f1d168");
 
         // USDG is currency1 in that log, so the native price is token1Price.
-        // Flipping this reads 0.00041 instead of ~2400 — six orders of
+        // Flipping this reads ~0.000419 instead of ~2390 — six orders of
         // magnitude, applied to every USD figure the package emits.
         assert!(!STABLECOIN_IS_TOKEN0);
 
-        // And the stablecoin really is the 6-decimal leg, not the 18-decimal
+        // The stablecoin is the 6-decimal leg and the base is the 18-decimal
         // one: sqrt_price_x96_to_token_prices is passed (18, 6) in that order.
         assert!(is_stablecoin(USDC));
-        assert!(!is_stablecoin(WRAPPED_NATIVE));
+        assert!(!is_stablecoin(NATIVE_ADDRESS));
+
+        // A native token0 must survive the decimals gate: effective_decimals
+        // short-circuits on is_native BEFORE the `measured` check, which is what
+        // lets an address(0) leg anchor at all.
+        assert_eq!(effective_decimals(NATIVE_ADDRESS, 0, false), Some(18));
+        // And the depth helper must read the native side rather than returning 0.
+        assert!(is_native_or_wrapped(NATIVE_ADDRESS));
     }
 
     #[test]
