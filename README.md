@@ -82,13 +82,26 @@ those addresses.
 WETH/USDG pool at fee 500 / tickSpacing 10 / no hook, initialized at block
 8,793,983.
 
-That pool was not guessed. There are **134** WETH/USDG pools on this
-PoolManager; over the 200k blocks to 52,625,973 this one took **917 swaps**
-against 128 for the next busiest and zero for the rest. Its latest
-`sqrtPriceX96` prices 1 WETH at **2,400.21 USDG**, which is the check that
-matters — a bad anchor poisons every other price in the package, silently.
+That pool was not guessed — but the comparison set was narrower than it should
+have been, and the README used to state the result as if it were global. It is
+the busiest of the **134 WETH/USDG** pools on this PoolManager: over the 200k
+blocks to 52,625,973 it took **917 swaps** against 128 for the next busiest and
+zero for the rest. Its latest `sqrtPriceX96` prices 1 WETH at **2,400.21 USDG**,
+which is the check that matters — a bad anchor poisons every other price in the
+package, silently.
 
-`STABLECOIN_IS_TOKEN0` is `false`: all 134 pools have `currency0 = WETH`.
+**It is not the best anchor on the chain.** The 344 native/USDG pools were never
+ranked, and one of them —
+`0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982` — is 2.14x
+deeper, busier, and initialised 8.62M blocks earlier, quoting within 0.018% of
+the chosen pool. See the `STABLECOIN_NATIVE_POOL_ID` doc comment for the full
+comparison, what the late first swap does and does not cost (early stock/USDG
+swaps are still priced — verified by streaming the pre-anchor era), and why the
+switch is left for a deliberate, stream-tested change.
+
+`STABLECOIN_IS_TOKEN0` is `false`: all 134 WETH/USDG pools have
+`currency0 = WETH`. It would stay `false` for the native/USDG candidate too,
+since `0x000…` sorts below `0x5fc5…`.
 
 **Filter on the `priced` flags, never on `amount_usd > 0`.** A genuine zero-value
 swap and an unpriced leg are different things.

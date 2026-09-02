@@ -190,23 +190,52 @@ pub const WHITELIST_TOKENS: [&str; 3] = [WRAPPED_NATIVE, USDC, NATIVE_ADDRESS];
 ///
 /// Chosen by configuration and pinned, per the Base rationale above — the point
 /// is that it cannot move underneath us, not that it was picked blindly.
-/// A DEEPER ALTERNATIVE EXISTS AND WAS NOT TAKEN.
+/// A DEEPER, OLDER ALTERNATIVE EXISTS AND WAS NOT TAKEN.
 ///
-/// This anchor was chosen among WETH/USDG pools. Measured over blocks
-/// 52,374,713–52,671,800, the native/USDG 500/10 pool
-/// 0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982 is the
-/// better one on every axis: virtual reserves 229.45 native / 547,620 USDG
-/// (~$1.10M) against this pool's 107.49 / 256,123 (~$512k), 1,994 swap-blocks
-/// against 1,616, and it is ~8.6M blocks older. The two quote 2,386.65 and
-/// 2,382.70 USDG per native at block 52,681,276 — 0.17% apart, so they agree
-/// and this is a depth choice, not a correctness one.
+/// This anchor was chosen among WETH/USDG pools only; the 344 native/USDG pools
+/// were never in the comparison set, and are equally valid anchors under this
+/// code. The best of them,
+/// 0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982
+/// (native/USDG, fee 500, tickSpacing 10, no hook), beats this one on every
+/// axis measured over chain 4663:
 ///
-/// Switching would also raise how often derived prices refresh, which is the
-/// staleness discussed on `price_writes`. It is left for a deliberate,
-/// stream-tested change rather than done here: the anchor sets the USD basis
-/// for every figure the package emits, `STABLECOIN_IS_TOKEN0` must be
-/// re-derived for the new pool's currency order, and none of that has been
-/// exercised against live data.
+/// | | this anchor | native/USDG candidate |
+/// |---|---|---|
+/// | virtual reserves | 107.2 native / 256,714 USDG | 229.1 / 548,476 — **2.14x** |
+/// | swaps, last 300k blocks | 1,854 | 2,223 |
+/// | initialised at block | 8,793,983 | 169,464 — **8.62M earlier** |
+/// | FIRST SWAP at block | 8,794,427 | 178,761 |
+///
+/// They quote 2,393.69 and 2,394.12 USDG per native at the same block (0.018%
+/// apart), so this is a depth-and-history choice, not a correctness one.
+///
+/// # What the late first swap does and does NOT cost
+///
+/// `native_usd` is written only when the anchor trades, so with this anchor it
+/// is never written before block 8,794,427 — 16.7% of chain history in which
+/// `native_price_usd` is empty and no `derived_native` is stored for any token.
+///
+/// It does NOT follow that early equity swaps are unpriced, and an audit that
+/// claimed so was wrong. [`usd_for_leg`] returns the human amount directly for
+/// a stablecoin leg, with no store read and no anchor, so a STOCK/USDG swap is
+/// priced from its USDG side alone. Verified by streaming this package over
+/// blocks 1,570,000-1,579,499 — 7.2M blocks before the anchor's first swap:
+/// both equity swaps in the window (AMD/USDG, NVDA/USDG) came out `priced=true`
+/// with amount_usd 15.602182 and 26.422699, and `native_price_usd` empty.
+///
+/// What the early era genuinely loses is any pool whose quote leg is native or
+/// WETH rather than the stablecoin: both legs then need `native_usd` and both
+/// return None. Sampling pre-anchor windows found exactly one such equity pool
+/// (META/native, initialised 7,505,182) and it had no swaps — the early equity
+/// market was USDG-quoted, which is why the era prices as well as it does.
+///
+/// Switching is still worth doing — it would restore `native_price_usd` and the
+/// derived ratios across 8.6M more blocks and add 2.14x depth — and the audit
+/// verified it needs no code change: `STABLECOIN_IS_TOKEN0` stays false
+/// (0x000… < 0x5fc5…), `effective_decimals` already substitutes NATIVE_DECIMALS
+/// for address(0), and `native_side_depth` already handles a native token0. It
+/// is left for a deliberate, stream-tested change rather than done here,
+/// because the anchor sets the USD basis for every figure the package emits.
 pub const STABLECOIN_NATIVE_POOL_ID: &str =
     "0xfcfae8fa0bd6da961bcf5d990f27690932deac4f093e99bf3e871691c6586593";
 
