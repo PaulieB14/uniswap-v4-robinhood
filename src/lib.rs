@@ -63,6 +63,7 @@ pub mod registry;
 pub mod stock_filter;
 pub mod registry_data;
 mod abi;
+mod aggregator;
 mod arrakis;
 mod db_out;
 mod enrich;
@@ -104,6 +105,7 @@ pub fn map_events(blk: Block) -> Result<proto::Events, Error> {
     let mut events = proto::Events::default();
 
     pool_manager::extract(&blk, &mut events);
+    aggregator::extract(&blk, &mut events);
     // PositionManager and the Arrakis hook factory are NOT wired on Robinhood.
     //
     // Both constants in those modules are Base deployments. Calling them here
