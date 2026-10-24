@@ -1,10 +1,12 @@
 specVersion: v0.1.0
 package:
   name: uniswap_v4_robinhood
-  version: v0.1.2
+  version: v0.2.0
   url: https://github.com/PaulieB14/uniswap-v4-robinhood
   image: ./icon.png
   description: >
+    Uniswap v4 DEX on Robinhood Chain: swaps, pools, liquidity, volume, Robinhood Stock Tokens, and Uniswap Aggregator Hooks (Slipstream and other wrapped venues).
+
     Uniswap V4 on Robinhood Chain (Arbitrum Orbit L2, chain id 4663), enriched
     and filtered to the official Robinhood Stock Token registry.
 
@@ -30,7 +32,6 @@ network: robinhood
 
 imports:
   database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
-  sql: https://github.com/streamingfast/substreams-sink-sql/releases/download/protodefs-v1.0.7/substreams-sink-sql-protodefs-v1.0.7.spkg
   # Block-level skip (eth_common:filtered_events) deliberately NOT used.
   # Base shipped no eth_common:filtered_events index here because 148 of 148
   # sampled Base blocks contained V4 activity, so filtering bought nothing.

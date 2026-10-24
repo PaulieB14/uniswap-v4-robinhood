@@ -247,6 +247,34 @@ this chain is a registry stock token.
 The fee_tier vs `swap.fee` regression tests are kept. That bug is protocol
 level, not Base specific.
 
+## Uniswap Aggregator Hooks (v0.2.0)
+
+[Aggregator Hooks](https://blog.uniswap.org/aggregator-hooks-are-now-live) (live Oct 22, 2026) wrap
+outside venues as v4 pools. Primary source:
+[Uniswap Labs hooks](https://developers.uniswap.org/docs/protocols/uniswap-labs-hooks) →
+[Uniswap/v4-hooks-public `src/aggregator-hooks`](https://github.com/Uniswap/v4-hooks-public/tree/main/src/aggregator-hooks).
+
+The hook takes the whole trade in `beforeSwap`, so the PoolManager `Swap` log for these pools has
+zero amounts. The real amounts are in the hook's `HookSwap` event. v0.2.0 adds:
+
+| Table | From |
+|---|---|
+| `aggregator_pool` | `AggregatorPoolRegistered(poolId)`: hook, `source`, tokens, `verified` |
+| `aggregator_swap` | `HookSwap`: signed amounts, protocol fee pips and amount |
+| `aggregator_fee` | `ProtocolFeesCollected` → TokenJar (`0x2ac03e14…82f8` here) |
+| view `aggregator_source_daily` | daily swaps, volume and fees per venue |
+
+Nothing is hard-coded. Events are matched by signature, and `verified` means the pool's
+`PoolKey.hooks` equals the emitter. `source` comes from the hook address's first byte (Uniswap's ID
+table: `A1` Slipstream, `93` PancakeSwap V3, `03`/`02` Uniswap V3/V2, `C1`/`C2` Curve, `F1`–`F3` Fluid,
+`95` LitePSM, `58` UniswapX); anything else is `unknown`. Existing tables are byte-identical to
+v0.1.2. The stock filter (`map_stock_events`) is unchanged.
+
+Hooks found on Robinhood Chain (they answer `aggregatorHookVersion()` on-chain; Uniswap publishes no
+address list yet): SlipstreamAggregator v1.0 at `0xa117c4f2…2888`, `0xa1ad09c9…2888`, `0xa13fcd83…2888`
+and `0xa1f9cda5…2888`. Third-party hooks built on the same base, e.g. `PonsCurve-1.0.0`
+`0xb091ec27…2888` and `DeepStateAggregator`, are indexed with `source = unknown`.
+
 ## Known gaps
 
 - **Verified against live Robinhood blocks** (v0.1.1). `map_stock_events` was
